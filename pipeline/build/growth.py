@@ -1,70 +1,34 @@
-"""Population growth from the Census population estimates (PEP), one consistent series.
+"""Population growth since the 2020 census (七普), one rule for cities, provinces and the nation (CN_PLAN §5.2).
 
 Helper module (no build()): used by cities.py and states.py.
 
-growth = population(end) / population(BASELINE_YEAR) - 1, over growth_years = [BASELINE_YEAR, end],
-where `end` is the ACS year the panels show (nation.json "year"). Both numbers come from the same
-PEP vintage, which estimates every year on the current (July 2023) metro delineations. So, unlike a
-comparison of two ACS releases, there is no border change between the two years (Chicago losing
-Kenosha County, Connecticut's planning regions, renamed areas such as Kiryas Joel-Poughkeepsie-
-Newburgh) and no mix of estimate vintages: every area is compared like for like.
+growth = population(year) / pop_census_2020 − 1, a fraction, over growth_years = [CENSUS_YEAR, year], where `year`
+is the cn_stats_city stats year (nation.json "year"). `population` is the 年末常住人口 of a 统计公报 and the base the
+七普 常住人口 (2020-11-01), so the window is about 3 years. growth is null (never a guess) when:
 
-A CBSA's growth is still null (never a guess) when:
-
-* it is not in the PEP metro file;
-* the PEP file's member counties differ from the OMB delineation the rest of the map uses (a guard
-  for a future delineation update arriving in one file before the other);
-* |growth| > MAX_GROWTH (a cap kept as a last sanity check; no US metro gained or lost a quarter of
-  its people in four years).
+* the record has no population of the stats year (its bulletin is unread; no other year is substituted), or no
+  census population (Taiwan);
+* |growth| > MAX_GROWTH (a sanity cap; cn_stats_city already drops a 2023 population more than 25% off the census).
 """
 
 from __future__ import annotations
 
+CENSUS_YEAR = 2020
 MAX_GROWTH = 0.25
-BASELINE_YEAR = 2021  # a ~4-year span ending at the ACS year shown in panels
 
 
-def rate(latest: float | None, earlier: float | None) -> float | None:
-    """latest / earlier - 1, rounded; None if either is missing or |rate| > MAX_GROWTH."""
-    if not latest or not earlier:
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def rate(pop, census) -> float | None:
+    """pop / census − 1, rounded to 4 places; None if either is unknown or |rate| > MAX_GROWTH."""
+    if not _is_num(pop) or not _is_num(census) or census <= 0 or pop <= 0:
         return None
-    g = latest / earlier - 1
+    g = pop / census - 1
     return round(g, 4) if abs(g) <= MAX_GROWTH else None
 
 
-class Growth:
-    """Growth rates from the processed pep_population interim, for the window ending at `end_year`."""
-
-    def __init__(self, pep: dict | None, end_year: int):
-        self.pep = pep
-        years = pep["years"] if pep else []
-        end = end_year if end_year in years else (max(years) if years else None)
-        if pep and end != end_year:
-            print(f"    PEP vintage {pep['year']} has no {end_year} estimate: growth ends in {end} "
-                  f"(check will flag this; fetch a newer pep_population)")
-        ok = pep is not None and end is not None and BASELINE_YEAR in years and end > BASELINE_YEAR
-        self.years = [BASELINE_YEAR, end] if ok else None
-        self._i = (years.index(BASELINE_YEAR), years.index(end)) if ok else None
-
-    def _window(self, pops: list | None) -> float | None:
-        if not pops or not self._i:
-            return None
-        return rate(pops[self._i[1]], pops[self._i[0]])
-
-    def nation(self) -> float | None:
-        return self._window(self.pep["nation"]) if self.pep else None
-
-    def state(self, fips: str) -> float | None:
-        return self._window(self.pep["states"].get(fips)) if self.pep else None
-
-    def cbsa(self, code: str, members: list[str] | None) -> tuple[float | None, str | None]:
-        """(growth or None, reason when None). `members` are the delineation's county FIPS."""
-        if not self.years:
-            return None, "no population estimates"
-        rec = self.pep["cbsa"].get(code)
-        if not rec or not rec.get("pop"):
-            return None, "not in population estimates"
-        if members is not None and set(members) != set(rec["counties"]):
-            return None, "estimates use a different county list"
-        g = self._window(rec["pop"])
-        return (g, None) if g is not None else (None, f"|growth| > {MAX_GROWTH:.0%}")
+def window(year: int | None) -> list[int] | None:
+    """growth_years for the stats year, or None."""
+    return [CENSUS_YEAR, year] if isinstance(year, int) and year > CENSUS_YEAR else None

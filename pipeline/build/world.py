@@ -1,27 +1,42 @@
-"""The map itself: hex grid, land/water, relief, land cover, states, counties, rivers.
+"""The map itself: hex grid, land/water, relief, land cover, provinces, counties, rivers, the 南海诸岛 inset.
 
-Also saves interim "_world" (grid + projection + per-cell state/county/water/cover)
-so the other builders can drop their data onto the same hexes.
+China edition (docs/CN_PLAN.md §2, §5.1). The frame and projection are fixed in core/geo.py (Albers 25°/47°N,
+105°E; 5471 × 4455 map km, 25 km hexes → 128 × 120 cells). National, provincial and county boundaries come only
+from cn_boundaries (DataV GeoAtlas, following the standard map); Natural Earth supplies neighbours (China point of
+view), lakes and rivers. ETOPO1 gives elevation, cn_landcover (MODIS MCD12Q1 IGBP via NASA GIBS) the land cover.
+
+Also saves interim "_world" (grid + projection + per-cell province/county/water/cover + county → prefecture) so
+the other builders (and build/locate.py) can drop their data onto the same hexes.
 """
 
 from __future__ import annotations
 
 import math
 from collections import Counter
+from pathlib import Path
 
-from ..core.geo import AlbersEllipsoid, MapProjection, Shape, ShapeIndex
+from ..core import china
+from ..core.geo import MAP_HEIGHT_KM, MAP_WIDTH_KM, InsetProjection, Shape, ShapeIndex, china_projection
 from ..core.hexgrid import SQRT3, HexGrid
 from ..core.store import load_interim, save_interim, write_web
 
-REQUIRES = ["census_boundaries", "natural_earth", "etopo", "nlcd"]
+REQUIRES = ["cn_boundaries", "natural_earth", "etopo", "cn_landcover"]
 PRODUCES = ["_world", "world.json"]
 
+VERSION = 3
 HEX_RADIUS_KM = 25.0
-MARGIN_KM = 200.0
-CONUS_EXCLUDE = {"02", "15", "60", "66", "69", "72", "78"}  # AK, HI, territories
 
-# Cell owner codes (besides state index >= 0)
+# Cell owner codes (besides province index >= 0)
 WATER, FOREIGN = -1, -2
+
+SAR_CITIES = ("810000", "820000")  # 香港, 澳门: their seat hexes are forced to the SAR (CN_PLAN §5.1)
+
+NOTICE = {
+    "text": "本地图仅供个人学习，未申请审图号。",
+    "boundary": "国界、省界及南海断续线依据阿里云 DataV.GeoAtlas 行政区划数据（源自高德开放平台，依据标准地图）绘制；"
+    "邻国取自 Natural Earth（中国视角版）。",
+    "sources": ["cn_boundaries", "natural_earth"],
+}
 
 # --- tables (written to world.json so the frontend and Almanac read one definition) ---------
 
@@ -29,68 +44,86 @@ LAND, OCEAN, COAST, LAKE = range(4)
 TIDAL_SEA_SHARE = 0.5  # share of ETOPO samples below 0 m that keeps a sea-centred hex as water
 COAST_DEPTH_M = -200
 WATER_TABLE = [
-    {"id": LAND, "name": "Land", "rule": "At least 4 of the hex's 7 sample points (centre + 6) fall on Census state or Natural Earth country outlines, unless the centre is sea and the ETOPO1 mean is at or below sea level, or at least half its ETOPO1 samples are (tidal bays such as the Chesapeake stay water)."},
-    {"id": OCEAN, "name": "Ocean", "color": "#1b4266", "rule": "Sea deeper than 200 m and not next to land."},
-    {"id": COAST, "name": "Coast", "color": "#2d6d97", "rule": "Sea next to a land hex, or shallower than 200 m (ETOPO1 mean)."},
-    {"id": LAKE, "name": "Lake", "color": "#3a80b0", "rule": "Water hex (most of its 7 sample points off land) with Natural Earth 1:50m lake points that outnumber sea points, or above sea level."},
+    {"id": LAND, "name": "陆地", "rule": "六边形的 7 个采样点（中心 + 6 个）中至少 4 个落在中国省级行政区（DataV）或邻国（Natural Earth）轮廓内；"
+     "但若中心点在海上且 ETOPO1 平均高程不高于海平面，或至少一半 ETOPO1 采样点低于海平面，则仍为水域（如杭州湾等潮汐海湾）。"
+     "香港、澳门的政府驻地所在六边形强制为陆地。"},
+    {"id": OCEAN, "name": "远海", "color": "#1b4266", "rule": "深于 200 米且不与陆地相邻的海域。"},
+    {"id": COAST, "name": "近海", "color": "#2d6d97", "rule": "与陆地六边形相邻，或 ETOPO1 平均水深浅于 200 米的海域。"},
+    {"id": LAKE, "name": "湖泊", "color": "#3a80b0", "rule": "水域六边形（多数采样点不在陆地上）中 Natural Earth 1:10m 湖泊采样点多于海洋采样点，或平均高程高于海平面。"},
 ]
 
 WATER_NOTE = (
-    "Census 1:20M state outlines and Natural Earth 1:50m country and lake outlines don't meet exactly. A sea hex whose "
-    "ETOPO1 mean is above sea level (and under half of its samples below it) becomes land when at least 4 of its 6 neighbours are land, or when it touches both "
-    "US and foreign land; it takes the neighbours' majority owner. Narrow reservoirs that cover less than half a hex "
-    "are land, and their river is drawn through them. Tidal bays stay water when the hex centre is sea and its "
-    "ETOPO1 mean is at or below sea level or at least half of its ETOPO1 samples are. A sea hex's "
-    "elevation is the mean of its ETOPO1 samples below sea level (its water depth)."
+    "中国的省级轮廓（DataV.GeoAtlas）与 Natural Earth 邻国轮廓并不完全吻合，二者重叠处以中国省界为准（先判省界）。"
+    "ETOPO1 平均高程高于海平面（且不到一半采样点低于海平面）的海洋六边形，若至少 4 个相邻六边形为陆地，或同时与中国和邻国陆地相邻，"
+    "则改为陆地，归属相邻陆地中的多数。不足半个六边形宽的水库算作陆地，河流从中穿过。中心点在海上且 ETOPO1 平均高程不高于海平面"
+    "或至少一半采样点低于海平面的潮汐海湾保持为水域。海洋六边形的高程为其低于海平面的 ETOPO1 采样点平均值（即水深）。"
 )
 
 FLAT, HILLS, MOUNTAINS, PEAKS = range(4)
 LAND_MIN_ALT_M = -100  # ETOPO samples below this inside a land hex are treated as sea floor
 RELIEF_TABLE = [
-    {"id": FLAT, "name": "Flat", "rule": "Elevation standard deviation inside the hex under 85 m."},
-    {"id": HILLS, "name": "Hills", "rule": "Elevation standard deviation ≥ 85 m."},
-    {"id": MOUNTAINS, "name": "Mountains", "rule": "Elevation standard deviation ≥ 260 m, or mean elevation ≥ 2,300 m."},
-    {"id": PEAKS, "name": "Peaks", "rule": "Mean elevation ≥ 2,700 m (alpine)."},
+    {"id": FLAT, "name": "平原", "rule": "六边形内高程标准差小于 85 米。"},
+    {"id": HILLS, "name": "丘陵", "rule": "高程标准差 ≥ 85 米。"},
+    {"id": MOUNTAINS, "name": "山地", "rule": "高程标准差 ≥ 260 米，或平均高程 ≥ 2300 米。"},
+    {"id": PEAKS, "name": "高山", "rule": "平均高程 ≥ 2700 米（高原与高山）。"},
 ]
 RELIEF_NOTE = (
-    "From ETOPO1 samples (~9 km apart, about 20 per hex) with altitude ≥ -100 m, so bays and sea floor don't "
-    "count; all samples are used if none qualify. Water hexes are always flat."
+    "取自 ETOPO1 采样（间距约 9 千米，每个六边形约 20 个），只用高程 ≥ −100 米的采样点，海湾和海底不计；若无合格采样点则全部使用。"
+    "若六边形较低的 60% 采样点是平坦低地（相差不到 60 米且低于 400 米），起伏降低一级（谷底）。水域六边形一律为平原。"
 )
 
-URBAN_MIN_PCT = 30
-# id, key, name, colour, NLCD codes, rule. Ids are fixed by docs/DATA_CONTRACTS.md.
+URBAN_MIN_PCT = 20
+# id, key, name, colour, cn_landcover groups, rule. Ids and keys are fixed by docs/DATA_CONTRACTS.md.
 COVER = [
-    (1, "forest_deciduous", "Deciduous forest", "#4f7a35", [41], "Forest (41+42+43) is the largest group and deciduous (41) the largest forest type."),
-    (2, "forest_evergreen", "Conifer forest", "#2f5a3a", [42], "Forest is the largest group and evergreen (42) the largest forest type."),
-    (3, "forest_mixed", "Mixed forest", "#43703f", [43], "Forest is the largest group and mixed (43) the largest forest type."),
-    (4, "scrub", "Scrub & desert", "#c9b07a", [52], "Shrub/scrub (52) is the largest group: deserts, chaparral, sagebrush."),
-    (5, "grassland", "Grassland", "#a9b35a", [71, 21], "Grassland/herbaceous (71) plus developed open space (21: lawns, parks) is the largest group."),
-    (6, "pasture", "Pasture", "#8fb04e", [81], "Pasture/hay (81) is the largest group."),
-    (7, "cropland", "Cropland", "#c2b84e", [82], "Cultivated crops (82) is the largest group."),
-    (8, "wetland", "Wetland", "#4f8a6e", [90, 95], "Woody (90) plus emergent herbaceous (95) wetlands is the largest group."),
-    (9, "urban", "Urban", "#8a8378", [22, 23, 24], f"Developed low/medium/high intensity (22+23+24) is ≥ {URBAN_MIN_PCT}% of the hex's land, whatever else is there."),
-    (10, "barren", "Barren", "#bfae95", [31], "Barren land (31: rock, sand, playa) is the largest group."),
-    (11, "ice", "Ice & snow", "#e8eef2", [12], "Perennial ice/snow (12) is the largest group."),
+    (1, "forest_deciduous", "落叶林", "#4f7a35", ["forest_deciduous"], "森林（三类合计）为最大类，且落叶林（落叶针叶林、落叶阔叶林）为最大的森林类型。"),
+    (2, "forest_evergreen", "常绿林", "#2f5a3a", ["forest_evergreen"], "森林为最大类，且常绿林（常绿针叶林、常绿阔叶林）为最大的森林类型。"),
+    (3, "forest_mixed", "混交林", "#43703f", ["forest_mixed"], "森林为最大类，且混交林（含多树草原，树木覆盖 30–60%）为最大的森林类型。"),
+    (4, "scrub", "灌丛与荒漠草原", "#c9b07a", ["scrub"], "灌丛（郁闭灌丛、稀疏灌丛）为最大类。"),
+    (5, "grassland", "草原", "#a9b35a", ["grassland"], "草地与稀树草原为最大类。"),
+    (6, "pasture", "农林镶嵌", "#8fb04e", ["pasture"], "耕地与自然植被镶嵌（小块农田夹杂林草）为最大类。"),
+    (7, "cropland", "耕地", "#c2b84e", ["cropland"], "耕地为最大类。"),
+    (8, "wetland", "湿地", "#4f8a6e", ["wetland"], "永久湿地为最大类。"),
+    (9, "urban", "城镇", "#8a8378", ["developed"], f"城市建设用地占六边形陆地采样点的 ≥ {URBAN_MIN_PCT}%（无论其余为何）。"
+     "MODIS 500 米城市像元偏少，故阈值低于美国版的 30%。"),
+    (10, "barren", "裸地与沙漠", "#bfae95", ["barren"], "裸地（岩石、沙漠、戈壁）为最大类。"),
+    (11, "ice", "冰雪", "#e8eef2", ["ice"], "永久冰雪为最大类。"),
 ]
 COVER_NOTE = (
-    "From NLCD 2021 (~2 km pixels), sampled on a 2 km lattice inside each US hex (about 400 points). Open water (11) "
-    "and no-data pixels are ignored; shares are of the remaining land points, rounded to whole percent, and the urban "
-    "threshold is applied to the rounded developed share. NLCD covers only the lower 48, so foreign hexes (Canada, "
-    "Mexico, the Caribbean) have cover 0 (none)."
+    "取自 MODIS MCD12Q1 v061 IGBP 土地覆盖 2024 年（经 NASA GIBS 以 0.02° 约 2 千米像元提供），在每个陆地六边形内按 2 千米格点采样"
+    "（约 470 个点）。水体与无数据像元不计；份额按其余陆地点计算并取整到百分比，城镇阈值按取整后的城市建设用地份额判断。"
+    "邻国陆地也有覆盖类型（雾化显示），但份额（pct）只给中国陆地六边形。"
 )
-# Groups competing for the dominant cover (urban is decided by its threshold first).
+# Groups competing for the dominant cover (urban is decided by its threshold first). Dict order breaks ties.
 GROUPS = {
-    "forest": (41, 42, 43), "scrub": (52,), "grassland": (71, 21), "pasture": (81,), "cropland": (82,),
-    "wetland": (90, 95), "barren": (31,), "ice": (12,),
+    "forest": ("forest_deciduous", "forest_evergreen", "forest_mixed"), "scrub": ("scrub",), "grassland": ("grassland",),
+    "pasture": ("pasture",), "cropland": ("cropland",), "wetland": ("wetland",), "barren": ("barren",), "ice": ("ice",),
 }
-FOREST_ID = {41: 1, 42: 2, 43: 3}
+FOREST_ID = {"forest_deciduous": 1, "forest_evergreen": 2, "forest_mixed": 3}
 GROUP_ID = {"scrub": 4, "grassland": 5, "pasture": 6, "cropland": 7, "wetland": 8, "barren": 10, "ice": 11}
 URBAN_ID = 9
 PCT = {
-    "forest": (41, 42, 43), "crop": (82,), "pasture": (81,), "grass": (71, 21), "shrub": (52,),
-    "wetland": (90, 95), "developed": (22, 23, 24),
+    "forest": ("forest_deciduous", "forest_evergreen", "forest_mixed"), "crop": ("cropland",), "pasture": ("pasture",),
+    "grass": ("grassland",), "shrub": ("scrub",), "wetland": ("wetland",), "developed": ("developed",),
 }
-NLCD_STEP_KM = 2.0
+NOT_LAND = ("water", "nodata")
+COVER_STEP_KM = 2.0
+
+# National boundary symbology (standard-map legend: 国界 and 未定国界). Every land edge between a Chinese hex and a
+# foreign hex is 国界, except the sections listed here, drawn as 未定国界: the boundary with the Kashmir region, whose
+# status is undetermined (the 1963 China–Pakistan boundary agreement is provisional pending the settlement of the
+# Kashmir dispute). A foreign hex belongs to a section when its country (Natural Earth a3) is listed and its centre
+# lies in the lon/lat box. Extend this table to re-class other sections after checking the current standard-map
+# sample (bzdt.ch.mnr.gov.cn).
+UNDEFINED_BOUNDARY = [
+    {"id": "kashmir", "name": "克什米尔地区", "a3": ["IND", "PAK"], "bbox": [72.0, 32.0, 80.6, 37.6]},
+]
+BOUNDARY_NOTE = (
+    "陆地国界按标准地图图例分为“国界”与“未定国界”两种符号：与克什米尔地区相邻的边界（其归属未定，1963 年中巴边界协定为临时协定）"
+    "画作未定国界，其余陆地国界画作国界。线位为 DataV 国界在六边形网格上的近似。"
+)
+
+RIVER_MAX_RANK = 8
+INSET_THIN_KM = 1.2  # inset vertex spacing (map km; × 1/0.3 ≈ 4 km on the ground)
 
 
 def classify_relief(mean: float, std: float) -> int:
@@ -114,20 +147,20 @@ def is_valley_floor(samples: list) -> bool:
 
 
 def dominant_cover(counts: Counter, land: int) -> int:
-    """Cover id for a hex from its NLCD class counts (land = points that are not water or no-data)."""
+    """Cover id for a hex from its land-cover group counts (land = points that are not water or no-data)."""
     if not land:
         return 0
-    if round(100 * sum(counts[c] for c in (22, 23, 24)) / land) >= URBAN_MIN_PCT:  # same rounding as pct.developed
+    if round(100 * counts["developed"] / land) >= URBAN_MIN_PCT:  # same rounding as pct.developed
         return URBAN_ID
     best, best_n = None, 0
-    for g, codes in GROUPS.items():  # dict order breaks ties
-        n = sum(counts[c] for c in codes)
+    for g, members in GROUPS.items():
+        n = sum(counts[m] for m in members)
         if n > best_n:
             best, best_n = g, n
     if best is None:
         return 0  # only developed land below the urban threshold
     if best == "forest":
-        return FOREST_ID[max((41, 42, 43), key=lambda c: counts[c])]
+        return FOREST_ID[max(GROUPS["forest"], key=lambda m: counts[m])]
     return GROUP_ID[best]
 
 
@@ -246,39 +279,173 @@ def majority(values: list, centre) -> object:
     return centre if centre in tied else tied[0]
 
 
+# --- polygon / line helpers for the inset and the dashed line -----------------------------------------------
+
+
+def clip_ring_rect(ring: list, x0: float, y0: float, x1: float, y1: float) -> list:
+    """Sutherland–Hodgman clip of a closed ring to an axis-aligned rectangle (lon/lat or km). Returns an open ring
+    (no repeated last point); [] when nothing is left. Edges along the rectangle are fine for filled drawing."""
+    pts = [tuple(p) for p in ring]
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    for axis, bound, keep_le in ((0, x0, False), (0, x1, True), (1, y0, False), (1, y1, True)):
+        if not pts:
+            return []
+        out = []
+        for k, cur in enumerate(pts):
+            prev = pts[k - 1]
+            cin = cur[axis] <= bound if keep_le else cur[axis] >= bound
+            pin = prev[axis] <= bound if keep_le else prev[axis] >= bound
+            if cin != pin:
+                t = (bound - prev[axis]) / (cur[axis] - prev[axis])
+                out.append((prev[0] + t * (cur[0] - prev[0]), prev[1] + t * (cur[1] - prev[1])))
+            if cin:
+                out.append(cur)
+        pts = out
+    return pts if len(pts) >= 3 else []
+
+
+def thin_points(pts: list, min_dist: float) -> list:
+    """Drop points closer than min_dist to the last kept one (open ring or polyline)."""
+    if not pts:
+        return []
+    out = [pts[0]]
+    for p in pts[1:]:
+        if math.dist(p, out[-1]) >= min_dist:
+            out.append(p)
+    return out
+
+
+def flat(pts, nd: int = 1) -> list:
+    return [round(v, nd) for p in pts for v in p]
+
+
+def dash_centerline(dash: dict, n: int = 16) -> list[tuple[float, float]]:
+    """Centre line (lon/lat) of one DataV dash. The dash is a thin closed band; its ring is split at the points
+    nearest the two published line ends into two sides, both resampled by arc length and averaged. Falls back to the
+    2-point line when the ring is missing."""
+    line = [tuple(p) for p in dash.get("line") or []]
+    rings = dash.get("rings") or []
+    if not rings or len(rings[0]) < 6 or len(line) != 2:
+        return line
+    ring = [tuple(p) for p in rings[0]]
+    if ring[0] == ring[-1]:
+        ring = ring[:-1]
+    ia = min(range(len(ring)), key=lambda k: math.dist(ring[k], line[0]))
+    ib = min(range(len(ring)), key=lambda k: math.dist(ring[k], line[1]))
+    if ia == ib:
+        return line
+    rot = ring[ia:] + ring[:ia]
+    jb = (ib - ia) % len(ring)
+    side1 = rot[: jb + 1]  # from the north end to the south end
+    side2 = (rot[jb:] + rot[:1])[::-1]  # also north → south
+
+    def resample(chain):
+        d = [0.0]
+        for p, q in zip(chain, chain[1:]):
+            d.append(d[-1] + math.dist(p, q))
+        total = d[-1] or 1.0
+        out, j = [], 0
+        for k in range(n + 1):
+            t = total * k / n
+            while j < len(chain) - 2 and d[j + 1] < t:
+                j += 1
+            seg = d[j + 1] - d[j] or 1.0
+            u = min(1.0, max(0.0, (t - d[j]) / seg))
+            out.append((chain[j][0] + u * (chain[j + 1][0] - chain[j][0]), chain[j][1] + u * (chain[j + 1][1] - chain[j][1])))
+        return out
+
+    a, b = resample(side1), resample(side2)
+    return [((p[0] + q[0]) / 2, (p[1] + q[1]) / 2) for p, q in zip(a, b)]
+
+
+def build_inset(bounds: dict, ne: dict, proj) -> dict:
+    """The 南海诸岛 inset (CN_PLAN §2.2): vector land, all ten dashes, island and 三沙市 labels, in map km."""
+    ins = InsetProjection(proj)
+    lon0, lat0, lon1, lat1 = ins.region
+
+    def overlaps(rings):
+        for r in rings:
+            xs, ys = [p[0] for p in r], [p[1] for p in r]
+            if max(xs) >= lon0 and min(xs) <= lon1 and max(ys) >= lat0 and min(ys) <= lat1:
+                return True
+        return False
+
+    def project_rings(rings, keep_small: bool):
+        out = []
+        for r in rings:
+            clipped = clip_ring_rect(r, lon0, lat0, lon1, lat1)
+            if not clipped:
+                continue
+            pts = [ins(lon, lat) for lon, lat in clipped]
+            thin = thin_points(pts, INSET_THIN_KM)
+            if len(thin) < 3:
+                if not keep_small:
+                    continue
+                thin = thin_points(pts, 0.05)  # tiny Chinese islands (西沙, 南沙 reefs) stay as specks
+                if len(thin) < 3:
+                    thin = pts[:3] if len(pts) >= 3 else []
+                if len(thin) < 3:
+                    continue
+            out.append(flat(thin))
+        return out
+
+    land = []
+    for p in bounds["provinces"]:
+        if overlaps(p["rings"]):
+            for pts in project_rings(p["rings"], keep_small=True):
+                land.append({"kind": "china", "code": p["code"], "pts": pts})
+    for c in ne["countries"]:
+        if overlaps(c["rings"]):
+            for pts in project_rings(c["rings"], keep_small=False):
+                land.append({"kind": "foreign", "name": c.get("name_zh") or c["name"], "pts": pts})
+
+    dashes = []
+    for d in sorted(bounds["dash_line"], key=lambda d: d["seq"]):
+        line = dash_centerline(d)
+        dashes.append(flat([ins(lon, lat) for lon, lat in line]))
+
+    islands = []
+    for isl in bounds["islands"]:
+        if isl.get("point") and ins.contains_lonlat(*isl["point"]):
+            x, y = ins(*isl["point"])
+            islands.append({"id": isl["id"], "name": isl["name"], "kind": isl["kind"], "x": round(x, 1), "y": round(y, 1)})
+    labels = []
+    sansha = next((p for p in bounds["prefectures"] if p["adcode"] == "460300"), None)
+    if sansha and sansha.get("seat"):
+        x, y = ins(*sansha["seat"])
+        labels.append({"name": sansha["name"], "x": round(x, 1), "y": round(y, 1), "kind": "city", "id": "460300"})
+    return {"title": "南海诸岛", **ins.to_dict(), "land": land, "dashes": dashes, "islands": islands, "labels": labels}
+
+
 def build() -> None:
-    bounds = load_interim("census_boundaries")
+    bounds = load_interim("cn_boundaries")
     ne = load_interim("natural_earth")
     etopo = load_interim("etopo")
-    nlcd = load_interim("nlcd")
+    lc = load_interim("cn_landcover")
 
-    states = [s for s in bounds["states"] if s["fips"] not in CONUS_EXCLUDE]
-    states.sort(key=lambda s: s["name"])
-    counties = [c for c in bounds["counties"] if c["state_fips"] not in CONUS_EXCLUDE]
-    counties.sort(key=lambda c: c["geoid"])
+    provinces = sorted(bounds["provinces"], key=lambda p: p["code"])
+    codes = [p["code"] for p in provinces]
+    pidx = {c: k for k, c in enumerate(codes)}
+    counties = sorted(bounds["counties"], key=lambda c: c["adcode"])
+    county_ids = [c["adcode"] for c in counties]
+    cidx = {c: k for k, c in enumerate(county_ids)}
+    county_prov = [pidx.get(c["province"], -1) for c in counties]
+    county_pref = [c["adcode"] if china.is_county_city(c["adcode"]) else c["prefecture"] for c in counties]
 
-    # Projection: fit the lower-48 with a margin.
-    probe = MapProjection(0, 0, 0)
-    xs, ys = [], []
-    for s in states:
-        for ring in s["rings"]:
-            for lon, lat in ring:
-                x, y = probe._albers(lon, lat)
-                xs.append(x)
-                ys.append(y)
-    proj = MapProjection(min(xs), max(ys), MARGIN_KM)
-    width = max(xs) - min(xs) + 2 * MARGIN_KM
-    height = max(ys) - min(ys) + 2 * MARGIN_KM
+    proj = china_projection()
+    width, height = MAP_WIDTH_KM, MAP_HEIGHT_KM
     grid = HexGrid.covering(width, height, HEX_RADIUS_KM)
     print(f"    grid {grid.cols}×{grid.rows} = {grid.size} hexes of {HEX_RADIUS_KM:g} km")
 
     def shape(rings):
         return Shape([[proj(lon, lat) for lon, lat in r] for r in rings])
 
-    state_idx = ShapeIndex([shape(s["rings"]) for s in states])
+    prov_idx = ShapeIndex([shape(p["rings"]) for p in provinces])
     county_idx = ShapeIndex([shape(c["rings"]) for c in counties], cell_km=60)
     foreign_idx = ShapeIndex([shape(c["rings"]) for c in ne["countries"]], cell_km=200)
-    lake_idx = ShapeIndex([shape(l["rings"]) for l in ne["lakes"]])
+    lake_shapes = [shape(l["rings"]) for l in ne["lakes"]]
+    lake_idx = ShapeIndex(lake_shapes)
 
     # --- elevation statistics per hex (land samples and all samples) -----------------------------
     stats_all = [[0, 0.0, 0.0] for _ in range(grid.size)]
@@ -311,9 +478,9 @@ def build() -> None:
         return m, math.sqrt(max(0.0, s2 / n - m * m))
 
     # --- ownership: majority of 7 sample points --------------------------------------------------
-    # The centre plus six points 60% of the way to each corner. Each point is lake, a state, foreign
-    # land or other water; the majority decides (the centre breaks ties). All seven also give an
-    # area-weighted county mix for lenses.
+    # The centre plus six points 60% of the way to each corner. Each point is lake, a province (tested before any
+    # Natural Earth country, so the DataV outline wins where they overlap), foreign land or other water; the
+    # majority decides (the centre breaks ties). All seven also give an area-weighted county mix.
     offsets = [(0.0, 0.0)] + [
         (0.6 * HEX_RADIUS_KM * math.cos(math.radians(60 * k - 30)), 0.6 * HEX_RADIUS_KM * math.sin(math.radians(60 * k - 30)))
         for k in range(6)
@@ -327,7 +494,7 @@ def build() -> None:
             x, y = cx + dx, cy + dy
             if lake_idx.locate(x, y) >= 0:
                 kinds.append("lake")
-            elif (s := state_idx.locate(x, y)) >= 0:
+            elif (s := prov_idx.locate(x, y)) >= 0:
                 kinds.append(s)
             elif foreign_idx.locate(x, y) >= 0:
                 kinds.append(FOREIGN)
@@ -335,14 +502,14 @@ def build() -> None:
                 kinds.append("sea")
         land = [k for k in kinds if not isinstance(k, str)]
         m_all, _ = mean_std(stats_all[i])
-        # Tidal bays (Chesapeake, Mobile, Biscayne, Puget Sound) are narrower than half a hex; keep them
-        # water when the centre is sea and the hex is mostly at or below sea level in ETOPO1.
+        # Tidal bays (杭州湾, 胶州湾) are narrower than half a hex; keep them water when the centre is sea and the
+        # hex is mostly at or below sea level in ETOPO1.
         tidal = kinds[0] == "sea" and m_all is not None and (m_all <= 0 or sea_share(i) >= TIDAL_SEA_SHARE)
         if len(land) * 2 > len(kinds) and not tidal:
-            us = [k for k in land if k >= 0]
-            n_foreign = len(land) - len(us)
-            if len(us) > n_foreign or (len(us) == n_foreign and kinds[0] != FOREIGN):
-                owner[i] = majority(us, kinds[0])
+            cn = [k for k in land if k >= 0]
+            n_foreign = len(land) - len(cn)
+            if len(cn) > n_foreign or (len(cn) == n_foreign and kinds[0] != FOREIGN):
+                owner[i] = majority(cn, kinds[0])
             else:
                 owner[i] = FOREIGN
             water[i] = LAND
@@ -354,10 +521,9 @@ def build() -> None:
             lakeish = "lake" in wet and (above_sea or majority(wet, kinds[0] if kinds[0] in wet else "lake") == "lake")
             water[i] = LAKE if lakeish else OCEAN
 
-    # Sliver fix: Census (1:20M) and Natural Earth (1:50m) outlines don't meet exactly, leaving water hexes
-    # on land along the 49th parallel and the Rio Grande. A non-lake water hex whose ETOPO mean is above sea
-    # level becomes land if at least 4 of its neighbours are land, or if it touches both US and foreign land.
-    # It takes its land neighbours' majority owner.
+    # Sliver fix: DataV and Natural Earth outlines don't meet exactly, leaving water hexes on land along the
+    # land borders. A non-lake water hex whose ETOPO mean is above sea level becomes land if at least 4 of its
+    # neighbours are land, or if it touches both Chinese and foreign land. It takes its land neighbours' majority.
     slivers = []
     for i in range(grid.size):
         if water[i] != OCEAN:
@@ -369,39 +535,70 @@ def build() -> None:
             slivers.append((i, Counter(land_nb).most_common(1)[0][0]))
     for i, o in slivers:
         owner[i], water[i] = o, LAND
-    print(f"    {len(slivers)} sliver water hexes turned into land: {[i for i, _ in slivers]}")
+    print(f"    {len(slivers)} sliver water hexes turned into land")
 
-    # --- counties for US cells -------------------------------------------------------------------
+    # Forced rule 1 (CN_PLAN §5.1): the hexes holding the seats of 香港 and 澳门 belong to the SAR.
+    pref_by_id = {p["adcode"]: p for p in bounds["prefectures"]}
+    forced: dict[int, str] = {}  # cell → SAR prefecture adcode
+    for sar in SAR_CITIES:
+        seat = (pref_by_id.get(sar) or {}).get("seat")
+        if not seat:
+            print(f"    WARNING: no seat for {sar}; its hex is not forced")
+            continue
+        sx, sy = proj(*seat)
+        cell = grid.cell_at(sx, sy)
+        if cell in forced:  # both seats in one hex: the later SAR (澳门) takes the nearest free neighbour
+            free = [j for j in grid.neighbours(cell) if j not in forced and (water[j] == LAND or any(water[k] == LAND for k in grid.neighbours(j)))]
+            if not free:
+                print(f"    WARNING: no free neighbour for {sar}")
+                continue
+            cell = min(free, key=lambda j: math.dist(grid.center(*grid.col_row(j)), (sx, sy)))
+        forced[cell] = sar
+        was = (owner[cell], water[cell])
+        owner[cell], water[cell] = pidx[sar[:2]], LAND
+        print(f"    {sar} seat hex {cell} forced to {sar[:2]} (was owner {was[0]}, water {was[1]})")
+
+    # --- counties for Chinese cells ----------------------------------------------------------------
     county = [-1] * grid.size
     county_samples: list[list[int]] = [[] for _ in range(grid.size)]
     for i in range(grid.size):
         if owner[i] >= 0:
             cx, cy = grid.center(*grid.col_row(i))
             county_samples[i] = [county_idx.locate(cx + dx, cy + dy) for dx, dy in offsets]
-    # Hexes whose seven points all miss the county polygons (e.g. reclaimed slivers) borrow the most
-    # common county of their same-state neighbours for the centre sample.
+    taiwan = pidx.get(china.TAIWAN)
+    # Hexes whose seven points all miss the county polygons (e.g. reclaimed coast) borrow the most common county of
+    # their same-province neighbours for the centre sample. Taiwan has no counties in DataV: its cells stay -1.
     borrowed = 0
     for i in range(grid.size):
         smp = county_samples[i]
-        if smp and max(smp) < 0:
-            nb = [k for j in grid.neighbours(i) if owner[j] == owner[i] for k in county_samples[j] if k >= 0]
+        if smp and max(smp) < 0 and owner[i] != taiwan:
+            nb = [k for j in grid.neighbours(i) if owner[j] == owner[i] for k in county_samples[j] if k >= 0 and county_prov[k] == owner[i]]
             if nb:
                 smp[0] = Counter(nb).most_common(1)[0][0]
                 borrowed += 1
-    # The hex's county must lie in its owner state (majority ownership can differ from the centre point):
-    # the centre if it does, else the most common in-state sample, else any sample. county_samples keep
-    # every point, so lenses still area-weight across state lines.
-    county_state = [c["state_fips"] for c in counties]
-    off_state = 0
+    # Forced rule 2: the SAR seat hexes get the SAR district at the seat (or the SAR district nearest to it).
+    for cell, sar in forced.items():
+        sx, sy = proj(*pref_by_id[sar]["seat"])
+        k = county_idx.locate(sx, sy)
+        if k < 0 or county_prefecture_of(county_pref, k) != sar:
+            cands = [j for j, c in enumerate(counties) if county_pref[j] == sar and c.get("seat")]
+            k = min(cands, key=lambda j: math.dist(proj(*counties[j]["seat"]), (sx, sy))) if cands else -1
+        if k >= 0:
+            county_samples[cell][0] = k
+    # The hex's county must lie in its owner province (majority ownership can differ from the centre point): the
+    # centre if it does, else the most common in-province sample, else any sample. county_samples keep every point.
+    off_prov = 0
     for i, smp in enumerate(county_samples):
         valid = [k for k in smp if k >= 0]
         if not valid:
             continue
-        same = [k for k in valid if county_state[k] == states[owner[i]]["fips"]]
+        same = [k for k in valid if county_prov[k] == owner[i]]
         pool = same or valid
         county[i] = smp[0] if smp[0] in pool else Counter(pool).most_common(1)[0][0]
-        off_state += not same
-    print(f"    {borrowed} US hexes borrowed a neighbour's county; {off_state} have no county in their own state")
+        off_prov += not same
+    no_county = sum(1 for i in range(grid.size) if owner[i] >= 0 and owner[i] != taiwan and county[i] < 0)
+    print(f"    {borrowed} hexes borrowed a neighbour's county; {off_prov} have no county in their own province; "
+          f"{no_county} Chinese land hexes outside Taiwan have no county")
 
     # --- elevation, water depth classes and relief -------------------------------------------------
     elev = [0] * grid.size
@@ -421,10 +618,10 @@ def build() -> None:
             elev[i] = round(m)
             relief[i] = classify_relief(max(m, 0.0), sd)
             if relief[i] in (HILLS, MOUNTAINS) and is_valley_floor(samples_land[i]):
-                relief[i] -= 1  # mostly flat lowland with a range at one edge (the Central Valley's rim)
+                relief[i] -= 1  # mostly flat lowland with a range at one edge
                 valley_floor += 1
             if samples_land[i]:
-                elev_max[i] = max(0, round(max(samples_land[i])))
+                elev_max[i] = min(9000, max(0, round(max(samples_land[i]))))
         else:
             m, _ = mean_std(stats_all[i])
             if m is None:
@@ -439,64 +636,148 @@ def build() -> None:
                 water[i] = COAST if near_land or elev[i] > COAST_DEPTH_M else OCEAN
     print(f"    {no_elev} hexes without elevation samples; {valley_floor} valley-floor hexes eased one relief class")
 
-    # --- land cover from NLCD --------------------------------------------------------------------
-    albers = AlbersEllipsoid()  # NLCD is in EPSG:5070
-    rows, legend = nlcd["rows"], nlcd["legend"]
-    x0, dx, y0, dy = nlcd["x0"], nlcd["dx"], nlcd["y0"], nlcd["dy"]
-    ncols, nrows = nlcd["cols"], len(rows)
-    lattice = hex_lattice(HEX_RADIUS_KM, NLCD_STEP_KM)
+    # --- land cover from cn_landcover (lon/lat raster) -----------------------------------------------
+    rows, legend = lc["rows"], lc["legend"]
+    groups = lc["groups"]
+    group_of_char = {ch: groups.get(str(code), "nodata") for ch, code in legend.items()}
+    lon0, lat0, dlon, dlat = lc["lon0"], lc["lat0"], lc["dlon"], lc["dlat"]
+    ncols, nrows = lc["cols"], len(rows)
+    lattice = hex_lattice(HEX_RADIUS_KM, COVER_STEP_KM)
     cover = [0] * grid.size
     pct = {k: [0] * grid.size for k in PCT}
     no_cover = 0
     for i in range(grid.size):
-        if owner[i] < 0:
+        if water[i] != LAND:
             continue
         cx, cy = grid.center(*grid.col_row(i))
+        # Local linearisation of the inverse projection (exact to metres over a 25 km hex).
+        lo_c, la_c = proj.inverse(cx, cy)
+        lo_x, la_x = proj.inverse(cx + 1.0, cy)
+        lo_y, la_y = proj.inverse(cx, cy + 1.0)
+        a, b, c_, d = lo_x - lo_c, lo_y - lo_c, la_x - la_c, la_y - la_c
         counts: Counter = Counter()
         for ox, oy in lattice:
-            ex, ey = albers(*proj.inverse(cx + ox, cy + oy))
-            c, r = round((ex - x0) / dx), round((ey - y0) / dy)
-            if 0 <= c < ncols and 0 <= r < nrows:
-                counts[rows[r][c]] += 1
-        counts = Counter({legend[ch]: n for ch, n in counts.items()})
-        land = sum(n for code, n in counts.items() if code not in (0, 11))
+            lon = lo_c + a * ox + b * oy
+            lat = la_c + c_ * ox + d * oy
+            col, row = round((lon - lon0) / dlon), round((lat - lat0) / dlat)
+            if 0 <= col < ncols and 0 <= row < nrows:
+                counts[group_of_char.get(rows[row][col], "nodata")] += 1
+        land = sum(n for g, n in counts.items() if g not in NOT_LAND)
         cover[i] = dominant_cover(counts, land)
+        if owner[i] < 0:
+            continue  # foreign land: cover (fogged) but no shares
         if not land:
             no_cover += 1
             continue
-        for k, codes in PCT.items():
-            pct[k][i] = round(100 * sum(counts[c] for c in codes) / land)
-    print(f"    {len(lattice)} NLCD points per hex; {no_cover} US hexes without land-cover samples")
+        for k, members in PCT.items():
+            pct[k][i] = round(100 * sum(counts[m] for m in members) / land)
+    print(f"    {len(lattice)} land-cover points per hex; {no_cover} Chinese hexes without land-cover samples; "
+          f"urban hexes {sum(1 for i in range(grid.size) if owner[i] >= 0 and cover[i] == URBAN_ID)}")
 
     # --- rivers ----------------------------------------------------------------------------------
-    # Lake centerlines are kept only where they cross land hexes (reservoirs narrower than half a hex,
-    # e.g. Lake Sakakawea or Lake Mead), so rivers don't stop in the middle of land; over water hexes they go.
+    # Lake centerlines are kept only where they cross land hexes (reservoirs narrower than half a hex), so rivers
+    # don't stop in the middle of land; over water hexes they go.
     def on_land(pt):
-        c = grid.cell_at(*pt)
-        return c >= 0 and water[c] == LAND
+        cell = grid.cell_at(*pt)
+        return cell >= 0 and water[cell] == LAND
 
-    by_river: dict[tuple, list] = {}
+    by_river: dict[tuple, dict] = {}
     for r in ne["rivers"]:
-        if r["rank"] > 8:
+        if r["rank"] > RIVER_MAX_RANK:
             continue
         line = [proj(lon, lat) for lon, lat in r["line"]]
         if (r.get("featurecla") or "").startswith("Lake Centerline"):
             parts = [run for p in clip_polyline(line, width, height) for run in land_runs(p, on_land)]
         else:
             parts = clip_polyline(line, width, height)
-        by_river.setdefault((r["name"], r["rank"]), []).extend(parts)
+        if not parts:
+            continue
+        key = (r.get("name_zh") or r["name"], int(r["rank"]))
+        rec = by_river.setdefault(key, {"name": r.get("name_zh"), "name_en": [], "parts": []})
+        if r["name"] and r["name"] not in rec["name_en"]:
+            rec["name_en"].append(r["name"])
+        rec["parts"].extend(parts)
     rivers = []
-    for (name, rank), parts in by_river.items():
-        for piece in join_lines(parts):
+    for (_, rank), rec in by_river.items():
+        for piece in join_lines(rec["parts"]):
             if sum(math.dist(a, b) for a, b in zip(piece, piece[1:])) < 1.0:
                 continue  # a corner clipped down to nothing
             pts = simplify(piece, 4.0)
             if len(pts) >= 2:
-                rivers.append({"name": name, "rank": rank, "pts": [round(v, 1) for p in pts for v in p]})
+                rivers.append({"name": rec["name"], "name_en": " / ".join(rec["name_en"]) or None, "rank": rank,
+                               "pts": [round(v, 1) for p in pts for v in p]})
+    rivers.sort(key=lambda r: (r["rank"], r["name"] or "~", r["name_en"] or ""))
 
-    cover_table = [{"id": 0, "key": "none", "name": "None", "rule": "Water, foreign land, or no NLCD land pixels."}] + [
-        {"id": cid, "key": key, "name": name, "color": color, "nlcd": codes, "rule": rule}
-        for cid, key, name, color, codes, rule in COVER
+    # --- lake label anchors: named lakes covering at least one lake hex ------------------------------
+    lakes = []
+    lake_cells: dict[int, list[int]] = {}
+    for i in range(grid.size):
+        if water[i] == LAKE:
+            k = lake_idx.locate(*grid.center(*grid.col_row(i)))
+            if k >= 0:
+                lake_cells.setdefault(k, []).append(i)
+    for k, cells in lake_cells.items():
+        name = ne["lakes"][k].get("name_zh")
+        if not name:
+            continue
+        pts = [grid.center(*grid.col_row(i)) for i in cells]
+        mx, my = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+        best = min(pts, key=lambda p: math.dist(p, (mx, my)))
+        lakes.append({"name": name, "x": round(best[0], 1), "y": round(best[1], 1), "cells": len(cells)})
+    lakes.sort(key=lambda l: -l["cells"])
+
+    # --- 南海诸岛 inset, the dashed line on the main map, island labels ------------------------------
+    inset = build_inset(bounds, ne, proj)
+    bx0, by0, bx1, by1 = inset["box"]
+
+    def visible(pt):
+        x, y = pt
+        return 0 <= x <= width and 0 <= y <= height and not (bx0 <= x <= bx1 and by0 <= y <= by1)
+
+    dash_line = []
+    for d in sorted(bounds["dash_line"], key=lambda d: d["seq"]):
+        line = [proj(lon, lat) for lon, lat in dash_centerline(d)]
+        for run in land_runs(line, visible, step=1.0):
+            pts = simplify(run, 15.0)
+            if len(pts) >= 2 and math.dist(pts[0], pts[-1]) >= 2.0:
+                dash_line.append(flat(pts))
+    islands = []
+    for isl in bounds["islands"]:
+        if isl.get("point"):
+            x, y = proj(*isl["point"])
+            if visible((x, y)):
+                islands.append({"id": isl["id"], "name": isl["name"], "kind": isl["kind"], "x": round(x, 1), "y": round(y, 1)})
+    labels = []
+    sansha = pref_by_id.get("460300")
+    if sansha and sansha.get("seat") and visible(proj(*sansha["seat"])):
+        x, y = proj(*sansha["seat"])
+        labels.append({"name": sansha["name"], "x": round(x, 1), "y": round(y, 1), "kind": "city", "id": "460300"})
+    print(f"    inset: {len(inset['land'])} land rings, {len(inset['dashes'])} dashes, {len(inset['islands'])} islands; "
+          f"main map: {len(dash_line)} dash pieces, islands {[i['name'] for i in islands]}")
+
+    # --- national boundary sections: foreign hexes whose edges with Chinese hexes are 未定国界 ---------------
+    undefined = []
+    for i in range(grid.size):
+        if owner[i] != FOREIGN:
+            continue
+        if not any(owner[j] >= 0 for j in grid.neighbours(i)):
+            continue
+        cx, cy = grid.center(*grid.col_row(i))
+        lon, lat = proj.inverse(cx, cy)
+        k = next((foreign_idx.locate(cx + dx, cy + dy) for dx, dy in offsets
+                  if foreign_idx.locate(cx + dx, cy + dy) >= 0), -1)
+        a3 = ne["countries"][k].get("a3") if k >= 0 else None
+        for sec in UNDEFINED_BOUNDARY:
+            x0, y0, x1, y1 = sec["bbox"]
+            if a3 in sec["a3"] and x0 <= lon <= x1 and y0 <= lat <= y1:
+                undefined.append(i)
+                break
+    boundary = {"undefined": undefined, "sections": UNDEFINED_BOUNDARY, "note": BOUNDARY_NOTE}
+    print(f"    national boundary: {len(undefined)} foreign hexes on 未定国界 sections")
+
+    cover_table = [{"id": 0, "key": "none", "name": "无", "rule": "水域，或没有土地覆盖陆地采样点。"}] + [
+        {"id": cid, "key": key, "name": name, "color": color, "groups": grp, "rule": rule}
+        for cid, key, name, color, grp, rule in COVER
     ]
     tables = {
         "water": WATER_TABLE,
@@ -504,15 +785,20 @@ def build() -> None:
         "cover": cover_table,
         "notes": {"water": WATER_NOTE, "relief": RELIEF_NOTE, "cover": COVER_NOTE},
     }
-    states_out = [{"fips": s["fips"], "abbr": s["abbr"], "name": s["name"]} for s in states]
+    states_out = []
+    for p in provinces:
+        full, short, abbr, kind = china.PROVINCES.get(p["code"], (p["name"], p.get("short") or p["name"], p.get("abbr"), p.get("kind")))
+        states_out.append({"fips": p["code"], "abbr": abbr, "name": short, "full": full, "kind": kind,
+                           "kind_label": china.PROVINCE_KIND_LABEL.get(kind)})
     write_web(
         "world.json",
         {
-            "version": 2,
+            "version": VERSION,
             "grid": grid.to_dict(),
             "width": round(width, 1),
             "height": round(height, 1),
-            "margin": MARGIN_KM,
+            "margin": proj.margin,
+            "projection": proj.to_dict(),
             "owner": owner,
             "county": county,
             "elev": elev,
@@ -523,8 +809,15 @@ def build() -> None:
             "pct": pct,
             "tables": tables,
             "states": states_out,
-            "counties": [{"geoid": c["geoid"], "name": c["name"]} for c in counties],
+            "counties": [{"geoid": c["adcode"], "name": c["name"]} for c in counties],
             "rivers": rivers,
+            "lakes": lakes,
+            "dash_line": dash_line,
+            "boundary": boundary,
+            "islands": islands,
+            "labels": labels,
+            "inset": inset,
+            "notice": NOTICE,
         },
     )
     save_interim(
@@ -533,12 +826,85 @@ def build() -> None:
             "grid": grid.to_dict(),
             "projection": proj.to_dict(),
             "owner": owner,
+            "states": codes,
+            "counties": county_ids,
+            "county_prefecture": county_pref,
             "county": county,
             "county_samples": county_samples,
-            "states": [s["fips"] for s in states],
-            "counties": [c["geoid"] for c in counties],
             "water": water,
             "cover": cover,
             "pct": pct,
+            "inset": inset,
         },
     )
+    sizes = Counter(owner)
+    print("    land hexes per province: " + ", ".join(f"{provinces[k]['short'] if provinces[k].get('short') else codes[k]} {sizes[k]}"
+                                                    for k in sorted(range(len(codes)), key=lambda k: -sizes[k])))
+    print(f"    Chinese land {sum(v for k, v in sizes.items() if k >= 0)}, foreign {sizes[FOREIGN]}, water {sizes[WATER]}")
+
+
+def county_prefecture_of(county_pref: list[str], k: int) -> str | None:
+    return county_pref[k] if 0 <= k < len(county_pref) else None
+
+
+# --- builder check (pipeline/check.py part 3) ----------------------------------------------------------------
+
+
+def is_production_grid(g) -> bool:
+    """True for the fixed China frame's grid (128 × 120 at 25 km); test fixtures use tiny synthetic grids."""
+    want = HexGrid.covering(MAP_WIDTH_KM, MAP_HEIGHT_KM, HEX_RADIUS_KM)
+    return isinstance(g, dict) and (g.get("cols"), g.get("rows"), g.get("radius")) == (want.cols, want.rows, want.radius)
+
+
+def check(web_dir: Path) -> list[tuple[str, str]]:
+    """China-specific checks of world.json v3: the territory and compliance items of CN_PLAN §2.3 / §7."""
+    import json
+
+    p = Path(web_dir) / "world.json"
+    if not p.exists():
+        return [("NOTE", "world.json missing (run: uv run python -m pipeline build world)")]
+    w = json.loads(p.read_text())
+    out: list[tuple[str, str]] = []
+    if w.get("version") != VERSION:
+        return [("FAIL", f"world.json version {w.get('version')!r}, expected {VERSION}")]
+    if not is_production_grid(w.get("grid")):
+        return [("NOTE", f"world.json grid {w.get('grid')} is not the production frame: territory checks skipped")]
+    codes = [s.get("fips") for s in w.get("states", [])]
+    if codes != sorted(china.PROVINCES):
+        out.append(("FAIL", f"world.json states must be the 34 province codes in order, got {len(codes)}"))
+    owner = w.get("owner") or []
+    sizes = Counter(owner)
+    missing = [codes[k] for k in range(len(codes)) if not sizes.get(k)]
+    if missing:
+        out.append(("FAIL", f"provinces without any land hex: {missing}"))
+    else:
+        out.append(("PASS", f"all {len(codes)} provinces own land hexes (台湾 {sizes[codes.index('71')]}, 海南 "
+                            f"{sizes[codes.index('46')]}, 香港 {sizes[codes.index('81')]}, 澳门 {sizes[codes.index('82')]})"))
+    big = sorted(range(len(codes)), key=lambda k: -sizes.get(k, 0))[:3]
+    if {codes[k] for k in big} != {"65", "54", "15"}:
+        out.append(("WARN", f"largest provinces are {[codes[k] for k in big]}, expected 新疆/西藏/内蒙古"))
+    names = {i.get("id") for i in w.get("islands", [])}
+    need = {"diaoyu", "chiwei"}
+    out.append(("PASS" if need <= names else "FAIL", f"main-map island labels: {sorted(names)} (钓鱼岛、赤尾屿 required)"))
+    inset = w.get("inset") or {}
+    nd = len(inset.get("dashes") or [])
+    out.append(("PASS" if nd == 10 else "FAIL", f"inset 南海诸岛: {nd} dashes (10 required), {len(inset.get('land') or [])} land rings"))
+    if inset.get("title") != "南海诸岛" or len(inset.get("box") or []) != 4:
+        out.append(("FAIL", "inset needs title 南海诸岛 and a 4-number box"))
+    if not w.get("dash_line"):
+        out.append(("FAIL", "world.json dash_line: no dashes on the main map (dashes 1–4 lie inside the frame)"))
+    notice = w.get("notice") or {}
+    if "未申请审图号" not in (notice.get("text") or "") or not notice.get("boundary"):
+        out.append(("FAIL", "world.json notice must carry the 审图号 notice and the boundary source"))
+    proj = w.get("projection") or {}
+    if not all(k in proj for k in ("min_x", "max_y", "margin", "lat1", "lat2", "lat0", "lon0")):
+        out.append(("FAIL", "world.json projection must carry min_x, max_y, margin, lat1, lat2, lat0, lon0"))
+    named = {r.get("name") for r in w.get("rivers", [])}
+    want = {"长江", "黄河", "西江", "黑龙江", "澜沧江", "雅鲁藏布江", "淮河", "汉江"}
+    lost = sorted(want - named)
+    out.append(("WARN" if lost else "PASS", f"major rivers named in Chinese: {sorted(want & named)}" + (f"; missing {lost}" if lost else "")))
+    county = w.get("county") or []
+    tw = codes.index("71") if "71" in codes else -2
+    nocounty = sum(1 for o, c in zip(owner, county) if o >= 0 and o != tw and c < 0)
+    out.append(("WARN" if nocounty else "PASS", f"Chinese land hexes outside Taiwan without a county: {nocounty}"))
+    return out

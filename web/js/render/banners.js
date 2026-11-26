@@ -20,12 +20,9 @@
 // blitted, so panning costs one drawImage per banner.
 import { css, luminance, shade } from "../color.js";
 import { drawIcon, hasIcon } from "../icons.js";
-import { compact, popShort } from "../ext/cityView/fmt.js"; // format.js plus a 1000K → 1.0M roll-over fix
+import { compact, popShort, SERIF, SANS } from "../format.js"; // 万 / 亿 / 万亿
 import { isCapital } from "../world.js";
 import { cityIsDot } from "./art/city.js";
-
-const SERIF = '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif';
-const SANS = "-apple-system, system-ui, sans-serif";
 
 // Two layouts: the full plate, and a compact one for the national view where plates crowd each other.
 const LAYOUTS = {
@@ -130,7 +127,7 @@ const metrics = new Map(); // `${city.id}|${layout}` -> measured layout (fonts a
 function measure(ctx, city, yields, nation, L) {
   const key = `${city.id}|${L.name}`;
   let m = metrics.get(key);
-  if (m && m.nation === nation && m.yields === yields && m.cityRef === city.name + city.population) return m;
+  if (m && m.nation === nation && m.yields === yields && m.cityRef === city.name + city.population + city.sizePop) return m;
   ctx.save();
   const runs = smallCapRuns(city.name);
   let nameW = 0;
@@ -142,7 +139,7 @@ function measure(ctx, city, yields, nation, L) {
   const capital = isCapital(city);
   if (capital) nameW += L.star + 3;
   ctx.font = L.pop;
-  const pop = popShort(city.population);
+  const pop = popShort(city.sizePop ?? city.population); // 2020 census when the stats year has none (drawn dimmed)
   const popW = ctx.measureText(pop).width;
   const growth = growthOf(city);
   const chevW = growth == null ? 0 : L.chev + 3;
@@ -162,7 +159,7 @@ function measure(ctx, city, yields, nation, L) {
   const tierW = parts.length ? Math.ceil(yieldsW + 18) : 0;
   m = {
     runs, nameW, capital, pop, popW, chevW, capW, parts, yieldsW, tierW, spec, specW, plateW,
-    growth, growthTxt, growthW, nation, yields, cityRef: city.name + city.population,
+    growth, growthTxt, growthW, nation, yields, cityRef: city.name + city.population + city.sizePop, census: !!city.sizeFromCensus,
   };
   metrics.set(key, m);
   return m;
@@ -456,7 +453,9 @@ function paintBanner(ctx, ox, oy, W, m, L, col, { selected, showYields, ptr = nu
   const darkText = luminance(col) > 0.36;
   const capMid = ox + (m.capW - chev * 0.5) / 2 + 0.5;
   const px0 = Math.round(capMid - (m.popW + m.chevW) / 2);
+  if (m.census) ctx.globalAlpha *= 0.72; // a 2020 census figure, not the stats year: dimmed
   liftedText(ctx, m.pop, px0, oy + NH / 2 + 0.5, darkText ? "#17110a" : "#fffaf0", darkText);
+  if (m.census) ctx.globalAlpha /= 0.72;
   if (m.growth != null) growthMark(ctx, px0 + m.popW + 3 + L.chev / 2, oy + NH / 2, L.chev, m.growth);
 
   // name in small caps, centred between the cap and the specialty medallion
@@ -498,6 +497,13 @@ function paintBanner(ctx, ox, oy, W, m, L, col, { selected, showYields, ptr = nu
 }
 
 // --- sprite cache ---------------------------------------------------------------------------------------------------
+
+/** Forget every measured layout and painted sprite (main.js calls it once the web font has loaded). */
+export function clearBannerCaches() {
+  metrics.clear();
+  tabWidths.clear();
+  sprites.clear();
+}
 
 const SPRITE_MAX = 500;
 const sprites = new Map(); // key -> {m, canvas, cssW, cssH}
@@ -557,6 +563,18 @@ function badgeFor(badges, city) {
 }
 
 /** Population floor for a hex radius in screen px: national view shows the big metros, close zoom everything. */
+// Cities by display size (population, else 2020 census; world.js sizePop), unknown last. Cached per array.
+const orders = new WeakMap();
+function bannerOrder(cities) {
+  let o = orders.get(cities);
+  if (!o) {
+    const sz = (c) => c.drawPop ?? c.sizePop ?? c.population ?? -1;
+    o = [...cities].sort((a, b) => sz(b) - sz(a));
+    orders.set(cities, o);
+  }
+  return o;
+}
+
 function popFloor(Rpx) {
   return Rpx < 5 ? 2e6 : Rpx < 8 ? 7e5 : Rpx < 14 ? 2.5e5 : Rpx < 24 ? 1.5e5 : Rpx < 40 ? 1e5 : Rpx < 70 ? 4e4 : 0;
 }
@@ -591,7 +609,7 @@ export function drawBanners(ctx, cam, w, state, yields, nation = state.nation) {
   const sel = state.selectedCity || null;
   const hov = state.hoverCell >= 0 ? w.cityByCell?.get(state.hoverCell) ?? null : null;
   const focus = state.bannerFocus || null;
-  const cities = state.cities;
+  const cities = bannerOrder(state.cities);
   // Horizontal room for plates: the screen, or state.bannerBounds {x0, x1} (css px) beside an open dock.
   const bx0 = state.bannerBounds?.x0 ?? 0, bx1 = state.bannerBounds?.x1 ?? cam.w;
   const badges = state.cityBadges || null; // Map id → {label, color}: the city-type tab on tiered banners
@@ -603,7 +621,10 @@ export function drawBanners(ctx, cam, w, state, yields, nation = state.nation) {
     const city = pinned ? sel : cities[k];
     if (!pinned) {
       if (city === sel) continue; // already placed
-      if (city.population < minPop || shown >= budget) break; // cities are sorted by population
+      if (shown >= budget) break;
+      const size = city.drawPop ?? city.sizePop ?? city.population;
+      if (size == null) break; // bannerOrder puts unknown sizes last
+      if (size < minPop) continue;
     }
     if (city.cell == null) continue;
     const [sx, sy] = cam.toScreen(grid.cx(city.cell), grid.cy(city.cell));

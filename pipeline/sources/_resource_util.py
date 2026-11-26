@@ -1,4 +1,4 @@
-"""Helpers shared by the resource sources (EIA, MSHA): a tiny xlsx reader and checked downloads.
+"""Helpers shared by sources: a tiny xlsx reader (statistical yearbook tables) and checked downloads.
 
 Not a source itself (no Source subclass), so the registry ignores it.
 """

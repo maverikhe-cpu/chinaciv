@@ -1,23 +1,21 @@
-// Map-art extension: tile improvements (Interstates and major highways, railroads, ports, airports),
-// military forts and restricted ground, wonders and protected land, and freight trade routes, each as a static layer
-// drawn into the cached map (nothing animates; an idle map draws no frames), with a switch in the "Map" menu.
+// Map-art extension: tile improvements (high-speed rail, conventional rail, expressways, the busiest airports and the
+// principal ports) and wonders with protected land (国家公园), each as a static layer drawn into the cached map
+// (nothing animates; an idle map draws no frames), with a switch in the "图层" menu.
 //
-// Data: infrastructure.json, military.json, wonders.json and trade.json (loaded eagerly by main.js right after the
-// first frame; app.loadData returns the same promise). A missing file (null) leaves its layers off and their switches
-// harmless. Defaults: roads, rail, ports & airports, military and wonders on (roads, rail and hubs only from the region
-// view in: see each layer's minRpx), trade routes off.
+// Data: infrastructure.json and wonders.json (loaded eagerly by main.js right after the first frame; app.loadData
+// returns the same promise). A missing file (null) leaves its layers off and their switches harmless. Defaults: all
+// on (roads and rail only from the region view in: see each layer's minRpx). Phase 1 has no military or trade layers.
 import { createModel } from "./model.js";
 import { makeLayers } from "./layers.js";
 import { tips } from "./tips.js";
 
 const TOGGLES = [
-  { id: "roads", label: "Roads", icon: "t-road", def: true, title: "Interstates and major highways (Natural Earth, as map art)", layers: ["roads"] },
-  { id: "rail", label: "Railroads", icon: "t-rail", def: true, title: "Main and secondary rail lines (Natural Earth, as map art)", layers: ["rail"] },
-  { id: "hubs", label: "Ports & airports", icon: "d-harbor", def: true, title: "USACE principal ports by tonnage, FAA primary and cargo airports", layers: ["hubs"] },
-  { id: "military", label: "Military", icon: "m-army", def: true, title: "DoD installations as forts, the largest ranges as restricted ground", layers: ["forts", "restricted", "plates"] },
-  { id: "wonders", label: "Wonders", icon: "w-landmark", def: true, title: "Most-visited parks, top research universities and curated landmarks", layers: ["wonders", "protected", "plates"] },
-  { id: "trade", label: "Trade routes", icon: "t-trade", def: false, title: "The 40 largest freight flows between states (FAF5 estimates)", layers: ["trade"] },
+  { id: "rail", label: "铁路", icon: "t-rail", def: true, title: "高速铁路（亮色带刻度）与普速铁路（OpenStreetMap，作为地图装饰）", layers: ["rail"] },
+  { id: "roads", label: "高速公路", icon: "t-road", def: true, title: "国家及省级高速公路（OpenStreetMap，作为地图装饰）", layers: ["roads"] },
+  { id: "hubs", label: "港口与机场", icon: "d-harbor", def: true, title: "按货物吞吐量排名的主要港口（交通运输部）与按旅客吞吐量排名的繁忙机场（中国民用航空局）", layers: ["hubs"] },
+  { id: "wonders", label: "奇观", icon: "w-landmark", def: true, title: "世界遗产、国家公园、5A 级景区与一流大学（按公开规则选取）", layers: ["wonders", "protected", "plates"] },
 ];
+const FILES = ["infrastructure", "wonders"];
 
 export function install(app) {
   const model = createModel(app.w);
@@ -40,7 +38,7 @@ export function install(app) {
     model.setData(name, data);
     app.requestDraw();
   };
-  for (const name of ["infrastructure", "military", "wonders", "trade"]) {
+  for (const name of FILES) {
     if (app.data[name] !== undefined) apply(name, app.data[name]);
     else app.loadData(name).then((d) => apply(name, d), (err) => console.warn(`map layers: ${name} failed to load`, err));
   }

@@ -1,12 +1,13 @@
-"""Validate web/data/*.json against docs/DATA_CONTRACTS.md (v2) and report data quality.
+"""Validate web/data/*.json against docs/DATA_CONTRACTS.md and docs/CN_PLAN.md (China, world.json v3) and
+report data quality.
 
     uv run python -m pipeline check
 
 Part 1 checks each file's shape: required keys, types, per-cell array lengths
-and value ranges, cross references (lens sources, resource types, state order).
-Part 2 is a data-quality report: population conservation of the density lens,
-cities on water or sharing a cell, null yields, rivers outside the map, counties
-missing from the hex sampling and per-lens null shares.
+and value ranges, cross references (lens sources, resource types, province order).
+Part 2 is a data-quality report: cities on water or sharing a cell, null yields,
+rivers outside the map, counties missing from the hex sampling and per-lens null
+shares.
 
 Every line is PASS, WARN or FAIL (NOTE for information). The exit code is 1 if
 anything FAILed. WARN thresholds are the constants below.
@@ -30,14 +31,12 @@ from pathlib import Path
 
 from .core.paths import INTERIM, WEB_DATA
 
-# Density lens total vs ACS county total. Tight because lenses.py uses the same
-# land-share formula, so this mainly catches dropped or double-counted people.
-CONSERVATION_TOLERANCE = 0.005
-LENS_NULL_WARN = 0.05  # share of US cells with a null lens value
-CONUS_EXCLUDE = {"02", "15", "60", "66", "69", "72", "78"}  # AK, HI, territories
+LENS_NULL_WARN = 0.05  # share of Chinese land cells with a null lens value
+WORLD_VERSION = 3
+TAIWAN = "71"  # no counties in DataV: its cells have county -1 by design
 
-REQUIRED = ["world.json", "cities.json", "states.json", "nation.json", "lenses.json", "sources.json"]
-OPTIONAL = ["resources.json", "counties.json"]
+REQUIRED = ["world.json", "cities.json", "states.json", "nation.json", "sources.json"]
+OPTIONAL = ["lenses.json", "resources.json"]
 
 WATER_IDS = range(0, 4)
 RELIEF_IDS = range(0, 4)
@@ -52,16 +51,17 @@ LENS_SCALES = {"log", "linear"}
 HIGHER_IS = {"good", "bad", "neutral"}
 RESOURCE_CATEGORIES = {"energy", "mineral", "agri"}
 COLOR = re.compile(r"^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([0-9a-fA-F]{2})?$")
-ECON_NUMBERS = ["population", "employed", "median_income", "median_rent", "home_value", "unemployment", "rent_burden", "gdp"]
-# The economic shape shared by a city, a state and nation.json "nation" (gdp_by_industry is optional).
-ECON_KEYS = ["population", "employed", "yields", "jobs", "median_income", "median_rent", "home_value",
-             "unemployment", "rent_burden", "gdp", "gdp_year", "growth", "growth_years"]
-GROWTH_MAX = 0.25  # the pipeline nulls |growth| above this (see pipeline/build/growth.py)
+ECON_NUMBERS = ["population", "pop_census_2020", "employed", "gdp"]
+# The economic shape shared by a city, a province and nation.json "nation" (CN_PLAN §5.2; gdp_by_industry optional).
+# US-only fields (median_income, unemployment, …) are omitted, not null (CN_PLAN §3.3).
+ECON_KEYS = ["population", "population_year", "pop_census_2020", "employed", "yields", "jobs", "gdp", "gdp_year",
+             "currency", "growth", "growth_years"]
+YIELD_UNITS = ("persons", "cny")
+GROWTH_MAX = 0.25  # the pipeline nulls |growth| above this
 CITY_RANK_BASE = ["population", "gdp", "gdp_per_capita", "growth"]
+CITY_ID = re.compile(r"^\d{6}$")  # prefecture adcode (or the project-assigned Taiwan city ids 7101xx)
 PEERS = 5
-COUNTY_FORMATS = (LENS_FORMATS - {"category"}) | {"text", "km2"}  # categorical county columns are "text"
-COUNTY_TEXT = ["geoid", "name", "state", "cbsa"]
-NOT_ADDITIVE = {"oil", "gas"}  # resource types whose item values are play areas (summary value is null)
+NOT_ADDITIVE = {"oil", "gas"}  # resource types whose item values are not additive (summary value is null)
 
 
 # ---------------------------------------------------------------- reporting
@@ -152,8 +152,8 @@ def check_world(r: Report, w) -> dict | None:
         r.fail("world.json: not an object")
         return None
     fails_before = r.count("FAIL")
-    if w.get("version") != 2:
-        r.fail(f"world.json: version is {w.get('version')!r}, expected 2 (still v1?)")
+    if w.get("version") != WORLD_VERSION:
+        r.fail(f"world.json: version is {w.get('version')!r}, expected {WORLD_VERSION} (still the US v2 file?)")
     if not need_keys(r, "world.json grid", w.get("grid"), ["radius", "cols", "rows"]):
         return None
     g = w["grid"]
@@ -161,16 +161,26 @@ def check_world(r: Report, w) -> dict | None:
         r.fail(f"world.json grid: bad values {g}")
         return None
     n = g["cols"] * g["rows"]
-    need_keys(r, "world.json", w, ["width", "height", "margin", "owner", "county", "elev", "water", "relief", "cover", "pct", "tables", "states", "counties", "rivers"])
+    need_keys(r, "world.json", w, ["width", "height", "margin", "projection", "owner", "county", "elev", "water", "relief",
+                                   "cover", "pct", "tables", "states", "counties", "rivers", "dash_line", "islands", "inset",
+                                   "notice"])
     for k in ("width", "height", "margin"):
         if k in w and not is_num(w[k]):
             r.fail(f"world.json {k}: not a number ({w[k]!r})")
+    proj = w.get("projection")
+    if "projection" in w and not (isinstance(proj, dict) and all(is_num(proj.get(k)) for k in
+                                                                  ("min_x", "max_y", "margin", "lat1", "lat2", "lat0", "lon0"))):
+        r.fail("world.json projection: needs numbers min_x, max_y, margin, lat1, lat2, lat0, lon0")
 
     states, counties = w.get("states") or [], w.get("counties") or []
-    if not all(isinstance(s, dict) and {"fips", "abbr", "name"} <= s.keys() for s in states):
-        r.fail("world.json states: every entry needs fips, abbr, name")
-    if not all(isinstance(c, dict) and {"geoid", "name"} <= c.keys() for c in counties):
-        r.fail("world.json counties: every entry needs geoid, name")
+    if not all(isinstance(s, dict) and {"fips", "abbr", "name", "full", "kind", "kind_label"} <= s.keys() for s in states):
+        r.fail("world.json states: every entry needs fips, abbr, name, full, kind, kind_label")
+    elif not all(isinstance(s["fips"], str) and re.fullmatch(r"\d{2}", s["fips"]) for s in states) or \
+            [s["fips"] for s in states] != sorted(s["fips"] for s in states):
+        r.fail("world.json states: fips must be 2-digit province codes, sorted")
+    if not all(isinstance(c, dict) and {"geoid", "name"} <= c.keys() and re.fullmatch(r"\d{6}", str(c["geoid"])) for c in counties):
+        r.fail("world.json counties: every entry needs a 6-digit geoid (county adcode) and a name")
+    _check_world_extras(r, w)
 
     ok = True
     owner = w.get("owner")
@@ -214,7 +224,7 @@ def check_world(r: Report, w) -> dict | None:
                 if over:
                     r.fail(f"world.json pct: {len(over)} cells sum above 100% (cells {_sample(over)})")
                 if outside:
-                    r.fail(f"world.json pct: {len(outside)} non-US cells have non-zero land-cover shares (must be 0)")
+                    r.fail(f"world.json pct: {len(outside)} non-Chinese cells have non-zero land-cover shares (must be 0)")
 
     tables = w.get("tables")
     if "tables" in w and need_keys(r, "world.json tables", tables, ["water", "relief", "cover"]):
@@ -229,32 +239,73 @@ def check_world(r: Report, w) -> dict | None:
 
     rivers = w.get("rivers") or []
     bad = [i for i, rv in enumerate(rivers) if not isinstance(rv, dict) or not {"name", "rank", "pts"} <= rv.keys()
+           or not (rv["name"] is None or isinstance(rv["name"], str))
            or not is_int(rv["rank"]) or not isinstance(rv["pts"], list) or len(rv["pts"]) < 4 or len(rv["pts"]) % 2 or not all(is_num(v) for v in rv["pts"])]
     if bad:
-        r.fail(f"world.json rivers: {len(bad)} malformed (need name, int rank, pts=[x0,y0,x1,y1,…])")
+        r.fail(f"world.json rivers: {len(bad)} malformed (need name str|null, int rank, pts=[x0,y0,x1,y1,…])")
 
     if ok and r.count("FAIL") == fails_before:
-        r.ok(f"world.json: {g['cols']}×{g['rows']} grid, {len(states)} states, {len(counties)} counties, {len(rivers)} rivers")
+        r.ok(f"world.json: v{w.get('version')}, {g['cols']}×{g['rows']} grid, {len(states)} provinces, {len(counties)} counties, "
+             f"{len(rivers)} rivers, inset {len((w.get('inset') or {}).get('dashes') or [])} dashes")
     return {
         "n": n, "grid": g, "owner": owner if owner_ok else None, "states": states, "counties": counties,
         "width": w.get("width"), "height": w.get("height"), "rivers": rivers,
     }
 
 
+def _check_world_extras(r: Report, w: dict) -> None:
+    """world.json v3 additions (CN_PLAN §5.1): dashed line, island labels, the 南海诸岛 inset and the notice."""
+    def polyline(v):
+        return isinstance(v, list) and len(v) >= 4 and len(v) % 2 == 0 and all(is_num(x) for x in v)
+
+    def label(v):
+        return isinstance(v, dict) and isinstance(v.get("name"), str) and is_num(v.get("x")) and is_num(v.get("y"))
+
+    if "dash_line" in w and not (isinstance(w["dash_line"], list) and all(polyline(d) for d in w["dash_line"])):
+        r.fail("world.json dash_line: must be a list of [x0, y0, x1, y1, …] polylines")
+    if "islands" in w and not (isinstance(w["islands"], list) and all(label(i) and "id" in i and "kind" in i for i in w["islands"])):
+        r.fail("world.json islands: every entry needs id, name, kind, x, y")
+    if "lakes" in w and not (isinstance(w["lakes"], list) and all(label(l) for l in w["lakes"])):
+        r.fail("world.json lakes: every entry needs name, x, y")
+    ins = w.get("inset")
+    if "inset" in w:
+        if not need_keys(r, "world.json inset", ins, ["title", "box", "region", "scale", "land", "dashes", "islands", "labels"]):
+            pass
+        elif not (isinstance(ins["box"], list) and len(ins["box"]) == 4 and all(is_num(v) for v in ins["box"])
+                  and ins["box"][0] < ins["box"][2] and ins["box"][1] < ins["box"][3]):
+            r.fail(f"world.json inset box: must be [x0, y0, x1, y1], got {ins['box']!r}")
+        elif not (isinstance(ins["dashes"], list) and len(ins["dashes"]) == 10 and all(polyline(d) for d in ins["dashes"])):
+            r.fail("world.json inset dashes: must be the 10 dashes as [x0, y0, …] polylines")
+        elif not all(isinstance(l, dict) and l.get("kind") in ("china", "foreign") and polyline(l.get("pts")) for l in ins["land"]):
+            r.fail("world.json inset land: every entry needs kind china|foreign and pts")
+        else:
+            x0, y0, x1, y1 = ins["box"]
+            stray = [l for l in ins["land"] for j in range(0, len(l["pts"]), 2)
+                     if not (x0 - 0.5 <= l["pts"][j] <= x1 + 0.5 and y0 - 0.5 <= l["pts"][j + 1] <= y1 + 0.5)]
+            if stray:
+                r.fail(f"world.json inset land: {len(stray)} vertices outside the inset box")
+    notice = w.get("notice")
+    if "notice" in w and not (isinstance(notice, dict) and isinstance(notice.get("text"), str) and notice["text"]
+                              and isinstance(notice.get("boundary"), str) and notice["boundary"]):
+        r.fail("world.json notice: needs text and boundary strings (CN_PLAN §2.3)")
+
+
 def _check_econ(r: Report, what: str, obj: dict, yield_keys) -> None:
-    """The economic fields shared by cities, states and the nation."""
+    """The economic fields shared by cities, provinces and the nation."""
     bad = [k for k in ECON_NUMBERS if k in obj and obj[k] is not None and not is_num(obj[k])]
     if bad:
         r.fail(f"{what}: non-numeric {', '.join(bad)}")
     y = obj.get("yields")
     if not isinstance(y, dict) or set(y) != set(yield_keys) or not all(v is None or is_num(v) for v in y.values()):
         r.fail(f"{what}: yields must have exactly {list(yield_keys)} with number|null values, got {y!r}"[:240])
-    if not isinstance(obj.get("jobs"), dict) or not all(v is None or is_num(v) for v in obj["jobs"].values()):
-        r.fail(f"{what}: jobs must be {{industry: number|null}}")
-    for k in ("unemployment", "rent_burden"):
-        v = obj.get(k)
-        if is_num(v) and not 0 <= v <= 1:
-            r.fail(f"{what}: {k}={v} is not a 0..1 fraction")
+    jobs = obj.get("jobs")
+    if jobs is not None and not (isinstance(jobs, dict) and all(v is None or is_num(v) for v in jobs.values())):
+        r.fail(f"{what}: jobs must be null or {{industry: number|null}}")
+    if obj.get("currency", "CNY") != "CNY":
+        r.fail(f"{what}: currency must be 'CNY' (stored values are always yuan)")
+    for k, yk in (("population", "population_year"), ("gdp", "gdp_year")):
+        if is_num(obj.get(k)) and not is_int(obj.get(yk)):
+            r.fail(f"{what}: {k} without an int {yk}")
     g, gy = obj.get("growth"), obj.get("growth_years")
     if g is not None and not (is_num(g) and abs(g) <= GROWTH_MAX):
         r.fail(f"{what}: growth={g!r} must be null or a fraction within ±{GROWTH_MAX:.0%}")
@@ -265,15 +316,15 @@ def _check_econ(r: Report, what: str, obj: dict, yield_keys) -> None:
 
 
 def check_growth(r: Report, docs: dict) -> None:
-    """Growth invariants across files: one growth window everywhere, ending at nation.json's year,
-    and every state and the nation have a rate whenever the window is set (their borders are fixed)."""
+    """Growth invariants across files: one growth window everywhere, ending at nation.json's year. Provinces may
+    lack a rate (a province whose latest-year population is unpublished); the nation has one whenever the window
+    is set."""
     nat = docs.get("nation.json") if isinstance(docs.get("nation.json"), dict) else None
     nation = nat.get("nation") if nat and isinstance(nat.get("nation"), dict) else None
     states = [s for s in docs.get("states.json") or [] if isinstance(s, dict)]
     cities = [c for c in docs.get("cities.json") or [] if isinstance(c, dict)]
-    fixed = [("nation.json nation", nation)] if nation else []  # fixed borders: always a rate
-    fixed += [(f"states.json {s.get('abbr') or s.get('fips')}", s) for s in states]
-    rows = fixed + [(f"cities.json {c.get('id')}", c) for c in cities]
+    fixed = [("nation.json nation", nation)] if nation else []  # always a rate when the window is set
+    rows = fixed + [(f"states.json {s.get('fips')}", s) for s in states] + [(f"cities.json {c.get('id')}", c) for c in cities]
     windows = {tuple(o["growth_years"]) for _, o in rows if isinstance(o.get("growth_years"), list)}
     bad = 0
     if len(windows) > 1:
@@ -286,11 +337,11 @@ def check_growth(r: Report, docs: dict) -> None:
             bad += 1
     for what, o in fixed:
         if o.get("growth_years") is not None and o.get("growth") is None:
-            r.fail(f"{what}: growth is null although growth_years is set (states and the nation always have one)")
+            r.fail(f"{what}: growth is null although growth_years is set (the nation always has one)")
             bad += 1
     if not bad and windows:
         (w,) = windows
-        r.ok(f"growth: one window {w[0]}→{w[1]} ending at nation.json year; every state and the nation have a rate")
+        r.ok(f"growth: one window {w[0]}→{w[1]} ending at nation.json year; the nation has a rate")
 
 
 def check_cities(r: Report, cities, ctx: dict | None, yield_keys=YIELD_KEYS) -> None:
@@ -306,19 +357,21 @@ def check_cities(r: Report, cities, ctx: dict | None, yield_keys=YIELD_KEYS) -> 
     dup = [i for i, k in ids.items() if k > 1]
     if dup:
         r.fail(f"cities.json: duplicate ids {_sample(dup)}")
-    bad_id = [c.get("id") for c in cities if not (isinstance(c.get("id"), str) and re.fullmatch(r"\d{5}", c["id"]))]
+    bad_id = [c.get("id") for c in cities if not (isinstance(c.get("id"), str) and CITY_ID.match(c["id"]))]
     if bad_id:
-        r.fail(f"cities.json: ids must be 5-digit CBSA strings: {_sample(bad_id)}")
+        r.fail(f"cities.json: ids must be 6-digit prefecture adcode strings: {_sample(bad_id)}")
     pops = [c.get("population") for c in cities]
-    if any(not is_num(p) or p <= 0 for p in pops):
-        r.fail("cities.json: every city needs a positive population")
-    elif pops != sorted(pops, reverse=True):
-        r.fail("cities.json: not sorted by population, descending")
-    capitals = [c.get("name") for c in cities if c.get("capital") is True]
-    if len(capitals) != 1:
-        r.warn(f"cities.json: expected exactly one capital (Washington), found {capitals}")
+    if any(p is not None and (not is_num(p) or p <= 0) for p in pops):
+        r.fail("cities.json: population must be positive or null")
+    else:
+        known = [p for p in pops if p is not None]
+        if known != sorted(known, reverse=True) or any(p is not None for p in pops[len(known):]):
+            r.fail("cities.json: not sorted by population, descending (nulls last)")
+    capitals = [c.get("id") for c in cities if c.get("capital") is True]
+    if capitals != ["110000"]:
+        r.warn(f"cities.json: expected exactly one capital (北京 110000), found {capitals}")
     n = ctx["n"] if ctx else None
-    abbrs = {s.get("abbr") for s in ctx["states"] if isinstance(s, dict)} if ctx and ctx["states"] else None
+    abbrs = {s.get("fips") for s in ctx["states"] if isinstance(s, dict)} if ctx and ctx["states"] else None
     for c in cities:
         what = f"cities.json {c.get('id')} {c.get('name')}"
         if not (is_num(c.get("x")) and is_num(c.get("y"))):
@@ -328,7 +381,7 @@ def check_cities(r: Report, cities, ctx: dict | None, yield_keys=YIELD_KEYS) -> 
         if not isinstance(c.get("states"), list) or not c.get("states"):
             r.fail(f"{what}: states must be a non-empty list")
         elif abbrs is not None and not set(c["states"]) <= abbrs:
-            r.fail(f"{what}: states {sorted(set(map(str, c['states'])) - abbrs)} are not world.json state abbrs")
+            r.fail(f"{what}: states {sorted(set(map(str, c['states'])) - abbrs)} are not world.json province codes")
         if not (isinstance(c.get("metro"), bool) and isinstance(c.get("capital"), bool)):
             r.fail(f"{what}: metro and capital must be true/false")
         _check_econ(r, what, c, yield_keys)
@@ -352,10 +405,10 @@ def _check_city_view(r: Report, what: str, c: dict, ctx: dict | None, ids: set) 
             r.fail(f"{what}: footprint does not include the city's own cell {c.get('cell')}")
         owner = ctx["owner"] if ctx else None
         if owner and any(not 0 <= v < ctx["n"] or owner[v] < 0 for v in fp):
-            r.fail(f"{what}: footprint has cells that are not US land")
+            r.fail(f"{what}: footprint has cells that are not Chinese land")
     cs = c.get("counties")
-    if not (isinstance(cs, list) and all(isinstance(g, str) and re.fullmatch(r"\d{5}", g) for g in cs)):
-        r.fail(f"{what}: counties must be a list of 5-digit GEOID strings")
+    if not (isinstance(cs, list) and all(isinstance(g, str) and re.fullmatch(r"\d{6}", g) for g in cs)):
+        r.fail(f"{what}: counties must be a list of 6-digit county adcode strings")
     ps = c.get("pop_series")
     if ps is not None and not (isinstance(ps, dict) and ps and all(re.fullmatch(r"\d{4}", str(y)) for y in ps)
                                and all(v is None or (is_num(v) and v > 0) for v in ps.values())):
@@ -371,6 +424,8 @@ def _check_city_ranks(r: Report, cities: list, keys: list) -> None:
     def value(c, k):
         if k == "gdp_per_capita":
             return c["gdp"] / c["population"] if is_num(c.get("gdp")) and is_num(c.get("population")) and c["population"] else None
+        if k == "population":  # the stats-year population, else the 2020 census (DATA_CONTRACTS)
+            return c["population"] if is_num(c.get("population")) else c.get("pop_census_2020")
         return c.get(k) if k in CITY_RANK_BASE else (c.get("yields") or {}).get(k)
 
     rows = [c for c in cities if isinstance(c, dict)]
@@ -398,8 +453,8 @@ def check_states(r: Report, states, ctx: dict | None, yield_keys=YIELD_KEYS) -> 
     if ctx and [s.get("fips") for s in states] != [s.get("fips") for s in ctx["states"]]:
         r.fail("states.json: not in the same order (fips) as world.json states")
     for s in states:
-        what = f"states.json {s.get('abbr') if isinstance(s, dict) else s!r}"
-        if not need_keys(r, what, s, ["fips", "abbr", "name", "ranks"] + ECON_KEYS):
+        what = f"states.json {s.get('fips') if isinstance(s, dict) else s!r}"
+        if not need_keys(r, what, s, ["fips", "abbr", "name", "full", "kind", "kind_label", "ranks", "note"] + ECON_KEYS):
             continue
         _check_econ(r, what, s, yield_keys)
         ranks = s["ranks"]
@@ -419,7 +474,7 @@ def check_states(r: Report, states, ctx: dict | None, yield_keys=YIELD_KEYS) -> 
             return
     _check_ranks(r, states, yield_keys)
     if r.count("FAIL") == fails_before:
-        r.ok(f"states.json: {len(states)} states, ranks are 1..N permutations ordered by yield")
+        r.ok(f"states.json: {len(states)} provinces, ranks are 1..N permutations ordered by yield")
 
 
 def _check_energy(r: Report, what: str, e) -> None:
@@ -443,7 +498,7 @@ def _check_ranks(r: Report, states: list, yield_keys) -> None:
     """Per yield key: ranks of states with a yield are a permutation of 1..N, null where the yield is null, 1 = largest."""
     rows = [s for s in states if isinstance(s, dict) and isinstance(s.get("ranks"), dict) and isinstance(s.get("yields"), dict)]
     for k in yield_keys:
-        ranked = [(s["ranks"].get(k), s["yields"].get(k), s.get("abbr")) for s in rows]
+        ranked = [(s["ranks"].get(k), s["yields"].get(k), s.get("fips")) for s in rows]
         mismatch = [a for rk, y, a in ranked if (rk is None) != (y is None)]
         have = sorted((rk, y, a) for rk, y, a in ranked if is_int(rk) and is_num(y))
         if mismatch:
@@ -469,8 +524,8 @@ def check_nation(r: Report, nat) -> list[str]:
                          ["key", "icon", "emoji", "label", "color", "unit", "description"]):
             continue
         keys.append(y["key"])
-        if y["unit"] not in ("workers", "usd") or not COLOR.match(str(y["color"])):
-            r.fail(f"nation.json yield {y['key']}: unit must be workers|usd and color #hex")
+        if y["unit"] not in YIELD_UNITS or not COLOR.match(str(y["color"])):
+            r.fail(f"nation.json yield {y['key']}: unit must be {'|'.join(YIELD_UNITS)} and color #hex")
     if not isinstance(nat["industries"], dict) or not all(isinstance(v, str) for v in nat["industries"].values()):
         r.fail("nation.json: industries must be {key: label}")
     if need_keys(r, "nation.json nation", nat["nation"], ECON_KEYS):
@@ -524,7 +579,7 @@ def check_lenses(r: Report, doc, ctx: dict | None, source_ids: set | None) -> No
         if ctx["owner"]:
             off = [i for i, v in enumerate(vals) if v is not None and ctx["owner"][i] < 0]
             if off:
-                r.fail(f"{what}: {len(off)} values on non-US cells (must be null)")
+                r.fail(f"{what}: {len(off)} values on non-Chinese cells (must be null)")
         if lens["format"] == "pct" and any(is_num(v) and not -1e-9 <= v <= 1 + 1e-9 for v in vals):
             r.fail(f"{what}: format pct but some values are outside 0..1 (pct lenses are fractions)")
         if lens["format"] == "category":
@@ -565,7 +620,7 @@ def check_resources(r: Report, doc, ctx: dict | None, source_ids: set | None, ci
             r.fail(f"{what}: category must be {sorted(RESOURCE_CATEGORIES)} and color #hex")
         if source_ids is not None and t["source"] not in source_ids:
             r.warn(f"{what}: source {t['source']!r} is not in sources.json")
-    abbrs = {s.get("abbr") for s in ctx["states"] if isinstance(s, dict)} if ctx and ctx["states"] else None
+    abbrs = {s.get("fips") for s in ctx["states"] if isinstance(s, dict)} if ctx and ctx["states"] else None
     bad_type, bad_shape, outside, bad_place = Counter(), 0, 0, 0
     for it in doc["items"]:
         if not isinstance(it, dict) or not {"type", "name", "x", "y", "cell", "value", "detail", "state", "cbsa"} <= it.keys():
@@ -583,7 +638,7 @@ def check_resources(r: Report, doc, ctx: dict | None, source_ids: set | None, ci
     if bad_shape:
         r.fail(f"resources.json: {bad_shape} items malformed (need type, name, x, y, cell, value number|null, detail, state, cbsa)")
     if bad_place:
-        r.fail(f"resources.json: {bad_place} items with a state that is not a world.json abbr or a cbsa that is not a cities.json id")
+        r.fail(f"resources.json: {bad_place} items with a state that is not a world.json province code or a cbsa that is not a cities.json id")
     _check_resource_summary(r, doc.get("summary"), types, [it for it in doc["items"] if isinstance(it, dict)])
     if bad_type:
         r.fail(f"resources.json: items with unknown types {dict(bad_type)}")
@@ -636,54 +691,6 @@ def _check_resource_summary(r: Report, summary, types: dict, items: list) -> Non
         r.fail(f"resources.json summary {e}")
 
 
-def check_counties(r: Report, doc, ctx: dict | None, city_ids: set | None) -> None:
-    if not need_keys(r, "counties.json", doc, ["vintage", "fields", "columns", "rows"]):
-        return
-    fails_before = r.count("FAIL")
-    fields, cols, rows = doc["fields"], doc["columns"], doc["rows"]
-    fkeys = ["key", "label", "format", "unit", "higher_is", "source", "description"]
-    if not (isinstance(fields, list) and all(isinstance(f, dict) and set(fkeys) <= f.keys() for f in fields)):
-        r.fail(f"counties.json fields: each needs {', '.join(fkeys)}")
-        return
-    if [f["key"] for f in fields] != cols:
-        r.fail("counties.json: fields[].key must equal columns, in order")
-        return
-    bad = [f["key"] for f in fields if f["format"] not in COUNTY_FORMATS or f["higher_is"] not in HIGHER_IS]
-    if bad:
-        r.fail(f"counties.json fields: bad format/higher_is for {_sample(bad)} (formats {sorted(COUNTY_FORMATS)})")
-    missing = [k for k in ["geoid", "name", "state", "population", "land_km2", "density", "cbsa"] if k not in cols]
-    if missing:
-        r.fail(f"counties.json: missing columns {missing}")
-        return
-    if not isinstance(rows, list) or any(not isinstance(row, list) or len(row) != len(cols) for row in rows):
-        r.fail(f"counties.json: rows must be lists of {len(cols)} values")
-        return
-    fmt = {f["key"]: f["format"] for f in fields}
-    errs = Counter()
-    for row in rows:
-        rec = dict(zip(cols, row))
-        for k, v in rec.items():
-            if v is None:
-                continue
-            if fmt[k] == "text":
-                if not isinstance(v, str):
-                    errs[f"{k} not text"] += 1
-            elif not is_num(v) or (fmt[k] == "pct" and not 0 <= v <= 1) or (k in ("population", "land_km2", "density") and v < 0):
-                errs[f"{k} out of range"] += 1
-        if not (isinstance(rec["geoid"], str) and re.fullmatch(r"\d{5}", rec["geoid"])):
-            errs["geoid not 5 digits"] += 1
-        if city_ids is not None and rec["cbsa"] is not None and rec["cbsa"] not in city_ids:
-            errs["cbsa not a cities.json id"] += 1
-    if errs:
-        r.fail(f"counties.json: {dict(errs)}")
-    if ctx and ctx["counties"]:
-        want = [c.get("geoid") for c in ctx["counties"] if isinstance(c, dict)]
-        if [row[cols.index("geoid")] for row in rows] != want:
-            r.fail("counties.json: rows must be world.json counties, in the same order")
-    if r.count("FAIL") == fails_before:
-        r.ok(f"counties.json: {len(rows)} counties × {len(cols)} columns ({doc['vintage']})")
-
-
 def check_sources(r: Report, doc) -> set | None:
     if not isinstance(doc, list):
         r.fail("sources.json: expected a list")
@@ -716,42 +723,6 @@ def _interim(interim_dir: Path, name: str):
     return json.loads(p.read_text()) if p.exists() else None
 
 
-def county_population(acs5: dict, geoids) -> dict[str, float]:
-    """ACS county population (B01003_001) for the given geoids, where known."""
-    geos = acs5.get("data", {}).get("geos", {})
-    out = {}
-    for g in geoids:
-        pop = geos.get("0500000US" + g, {}).get("B01003_001")
-        if is_num(pop):
-            out[g] = pop
-    return out
-
-
-def quality_density(r: Report, ctx: dict, lenses: dict, samples, county_pop: dict[str, float]) -> float | None:
-    """Σ density × land area over US cells vs the ACS total of the map's counties. Returns the ratio."""
-    dens = next((l for l in lenses.get("lenses", []) if isinstance(l, dict) and l.get("id") == "density"), None)
-    if not dens or not isinstance(dens.get("values"), list) or len(dens["values"]) != ctx["n"] or not ctx["owner"]:
-        r.note("density conservation: no usable density lens")
-        return None
-    if not county_pop:
-        r.note("density conservation: no ACS county populations (acs_5yr interim missing)")
-        return None
-    hex_area = 1.5 * math.sqrt(3) * ctx["grid"]["radius"] ** 2
-    total = 0.0
-    for i, v in enumerate(dens["values"]):
-        if v is None or ctx["owner"][i] < 0:
-            continue
-        s = samples[i] if samples and i < len(samples) else None
-        land = sum(1 for k in s if k >= 0) / len(s) if s else 1.0
-        total += v * hex_area * land
-    acs_total = sum(county_pop.values())
-    ratio = total / acs_total
-    msg = (f"density conservation: Σ density × land area = {total / 1e6:.1f}M vs ACS county total {acs_total / 1e6:.1f}M "
-           f"({ratio:.2%}; tolerance ±{CONSERVATION_TOLERANCE:.1%}; land share {'from _world samples' if samples else 'assumed 1'})")
-    (r.ok if abs(ratio - 1) <= CONSERVATION_TOLERANCE else r.warn)(msg)
-    return ratio
-
-
 def quality_cities(r: Report, ctx: dict, cities: list) -> None:
     owner = ctx["owner"]
     if owner:
@@ -765,35 +736,22 @@ def quality_cities(r: Report, ctx: dict, cities: list) -> None:
         f"cells holding more than one city: {len(shared)}" + (f" ({_sample(['+'.join(v) for v in shared.values()], 6)})" if shared else ""))
 
 
-def quality_null_yields(r: Report, name: str, rows: list, published: dict | None = None) -> None:
-    """Null and zero yields. A zero is a WARN (a stand-in for unknown?) unless `published`
-    ({row id: {yield key: value}}, recomputed from the ACS interim) shows the source said 0 too."""
-    nulls, zeros, confirmed = Counter(), Counter(), Counter()
+def quality_null_yields(r: Report, name: str, rows: list) -> None:
+    """Null and zero yields. A zero is a WARN: null means unknown, so a 0 is only right when the publisher says 0."""
+    nulls, zeros = Counter(), Counter()
     for row in rows:
-        src = (published or {}).get(row.get("id")) or {}
         for k, v in (row.get("yields") or {}).items():
             if v is None:
                 nulls[k] += 1
             elif v == 0:
-                (confirmed if src.get(k) == 0 else zeros)[k] += 1
+                zeros[k] += 1
     r.note(f"{name} null yields: {dict(nulls) or 'none'}")
-    if confirmed:
-        r.note(f"{name} yields of 0 published as 0 by the ACS (small samples): {dict(confirmed)}")
     if zeros:
         r.warn(f"{name} yields exactly 0 (a stand-in for unknown?): {dict(zeros)}")
 
 
-def published_city_yields(acs1: dict | None) -> dict:
-    """{CBSA code: worker yields} recomputed from the acs_1yr interim, to tell real zeros from bugs."""
-    if not acs1:
-        return {}
-    from .build.yields import economy
-
-    return {code: economy(rec)["yields"] for code, rec in (acs1.get("data", {}).get("cbsa") or {}).items()}
-
-
 def quality_growth(r: Report, name: str, rows: list) -> None:
-    """How many rows have a growth rate (see pipeline/build/growth.py for when a city has none)."""
+    """How many rows have a growth rate (a row has none when its latest-year population is unpublished)."""
     have = [row["growth"] for row in rows if is_num(row.get("growth"))]
     if not rows:
         return
@@ -824,75 +782,37 @@ def quality_rivers(r: Report, ctx: dict) -> None:
         r.ok(f"rivers: all {len(ctx['rivers'])} inside the map")
 
 
-def quality_counties(r: Report, ctx: dict, world_interim: dict | None, county_pop: dict[str, float], gaz: dict | None,
-                     ratio: float | None = None) -> None:
-    """Counties with ACS population that no hex sample hits, and whether their centre lands on a US cell.
-
-    A group of such counties is a WARN unless the density lens conserves population to
-    within the smaller of the tolerance and half that group's share. Dropping the group
-    would move the ratio by its whole share, so only then is the ratio evidence that
-    (at least most of) them are placed.
-    """
+def quality_counties(r: Report, ctx: dict, world_interim: dict | None) -> None:
+    """Counties (区县) that no hex sample hits. Many urban districts and the SAR districts are much smaller than a
+    25 km hex, so this is information (NOTE), not an error; site builders place points by polygon, not by hex."""
     if not world_interim or "county_samples" not in world_interim:
         r.note("county coverage: _world interim missing")
         return
     geoids = world_interim.get("counties") or [c.get("geoid") for c in ctx["counties"]]
     hit = {k for s in world_interim["county_samples"] for k in s if k >= 0}
     hit |= {k for k in (world_interim.get("county") or []) if is_int(k) and k >= 0}
-    unsampled = [(geoids[k], county_pop[geoids[k]]) for k in range(len(geoids)) if k not in hit and geoids[k] in county_pop]
-    if not unsampled:
-        r.ok("county coverage: every county with ACS population is hit by a hex sample")
-        return
-    total_pop = sum(county_pop.values())
-
-    def consistent(pop: float) -> bool:
-        return ratio is not None and abs(ratio - 1) < min(CONSERVATION_TOLERANCE, pop / total_pop / 2)
-
-    un_pop = sum(p for _, p in unsampled)
-    (r.note if consistent(un_pop) else r.warn)(
-        f"county coverage: {len(unsampled)} counties ({un_pop / 1e6:.2f}M people, {un_pop / total_pop:.2%}) are hit by no sample; "
-        + ("the density ratio is consistent with them being placed by their centre" if consistent(un_pop)
-           else "the density ratio cannot confirm they are placed (builders must place them by their centre)"))
-    if not (gaz and ctx["owner"] and "projection" in world_interim):
-        return
-    try:
-        from .core.geo import MapProjection
-        from .core.hexgrid import HexGrid
-
-        proj, grid = MapProjection(**world_interim["projection"]), HexGrid(**ctx["grid"])
-    except Exception as exc:  # geo.py is shared code; don't let it take the report down
-        r.note(f"county coverage: cannot project centres ({exc})")
-        return
-    off = []
-    for geoid, pop in unsampled:
-        g = gaz.get("counties", {}).get(geoid)
-        if not g:
-            off.append((geoid, pop, "no gazetteer point"))
-            continue
-        cell = grid.cell_at(*proj(g["lon"], g["lat"]))
-        if cell < 0 or ctx["owner"][cell] < 0:
-            off.append((geoid, pop, g.get("name")))
-    if off:
-        off_pop = sum(p for _, p, _ in off)
-        placed = consistent(off_pop)
-        names = _sample([f"{n} {g}" for g, _, n in sorted(off, key=lambda t: -t[1])])
-        (r.note if placed else r.warn)(
-            f"county coverage: {len(off)} unsampled counties ({off_pop:,.0f} people) have their centre off US land: {names}; "
-            + ("the density ratio is consistent with them being snapped onto land" if placed else "unless a builder snaps them they are dropped"))
-    else:
-        r.ok("county coverage: every unsampled county's centre is on a US land cell")
+    missed = [geoids[k] for k in range(len(geoids)) if k not in hit]
+    (r.note if missed else r.ok)(f"county coverage: {len(geoids) - len(missed)} of {len(geoids)} counties are hit by a hex sample"
+                                 + (f"; {len(missed)} smaller than the sampling (e.g. {_sample(missed)})" if missed else ""))
+    owner, county = ctx["owner"], world_interim.get("county")
+    if owner and isinstance(county, list) and len(county) == len(owner):
+        codes = [s.get("fips") for s in ctx["states"] if isinstance(s, dict)]
+        tw = codes.index(TAIWAN) if TAIWAN in codes else None
+        none = [i for i, o in enumerate(owner) if o >= 0 and o != tw and county[i] < 0]
+        (r.warn if none else r.ok)(f"Chinese land cells outside Taiwan without a county: {len(none)}"
+                                   + (f" (cells {_sample(none)})" if none else ""))
 
 
 def quality_lens_nulls(r: Report, ctx: dict, lenses: dict) -> None:
     if not ctx["owner"]:
         return
-    us = [i for i, o in enumerate(ctx["owner"]) if o >= 0]
+    cn = [i for i, o in enumerate(ctx["owner"]) if o >= 0]
     for lens in lenses.get("lenses", []):
         vals = lens.get("values") if isinstance(lens, dict) else None
-        if not isinstance(vals, list) or len(vals) != ctx["n"] or not us:
+        if not isinstance(vals, list) or len(vals) != ctx["n"] or not cn:
             continue
-        share = sum(1 for i in us if vals[i] is None) / len(us)
-        (r.warn if share > LENS_NULL_WARN else r.ok)(f"lens {lens.get('id')}: {share:.1%} of {len(us)} US cells are null (warn above {LENS_NULL_WARN:.0%})")
+        share = sum(1 for i in cn if vals[i] is None) / len(cn)
+        (r.warn if share > LENS_NULL_WARN else r.ok)(f"lens {lens.get('id')}: {share:.1%} of {len(cn)} Chinese land cells are null (warn above {LENS_NULL_WARN:.0%})")
 
 
 # ---------------------------------------------------------------- entry point
@@ -964,7 +884,7 @@ def run(web_dir: Path = WEB_DATA, interim_dir: Path = INTERIM, quiet: bool = Fal
     instead; [] to skip part 3.
     """
     r = Report(quiet)
-    r.section("contracts (docs/DATA_CONTRACTS.md v2)")
+    r.section("contracts (docs/DATA_CONTRACTS.md, docs/CN_PLAN.md; world.json v3)")
     docs = {name: _load(r, web_dir, name, True) for name in REQUIRED}
     docs.update({name: _load(r, web_dir, name, False) for name in OPTIONAL})
     ctx = check_world(r, docs["world.json"]) if docs["world.json"] is not None else None
@@ -981,8 +901,6 @@ def run(web_dir: Path = WEB_DATA, interim_dir: Path = INTERIM, quiet: bool = Fal
         check_lenses(r, docs["lenses.json"], ctx, source_ids)
     if docs["resources.json"] is not None:
         check_resources(r, docs["resources.json"], ctx, source_ids, city_ids)
-    if docs["counties.json"] is not None:
-        check_counties(r, docs["counties.json"], ctx, city_ids)
     check_growth(r, docs)
 
     r.section("data quality")
@@ -992,27 +910,18 @@ def run(web_dir: Path = WEB_DATA, interim_dir: Path = INTERIM, quiet: bool = Fal
         return r
     wi = _interim(interim_dir, "_world")
     world_interim = wi.get("data") if wi else None
-    acs5 = _interim(interim_dir, "acs_5yr")
-    gaz = _interim(interim_dir, "census_gazetteer")
-    geoids = [c.get("geoid") for c in ctx["counties"] if isinstance(c, dict)]
-    geoids = [g for g in geoids if isinstance(g, str) and g[:2] not in CONUS_EXCLUDE]
-    county_pop = county_population(acs5, geoids) if acs5 else {}
-    samples = world_interim.get("county_samples") if world_interim else None
-    ratio = None
     if isinstance(docs["lenses.json"], dict):
-        ratio = quality_density(r, ctx, docs["lenses.json"], samples, county_pop)
         quality_lens_nulls(r, ctx, docs["lenses.json"])
-    quality_counties(r, ctx, world_interim, county_pop, gaz.get("data") if gaz else None, ratio)
+    quality_counties(r, ctx, world_interim)
     if isinstance(docs["cities.json"], list):
         cities = [c for c in docs["cities.json"] if isinstance(c, dict)]
         quality_cities(r, ctx, cities)
-        quality_null_yields(r, "cities", cities, published_city_yields(_interim(interim_dir, "acs_1yr")))
+        quality_null_yields(r, "cities", cities)
         quality_growth(r, "cities", cities)
     if isinstance(docs["states.json"], list):
         states = [s for s in docs["states.json"] if isinstance(s, dict)]
-        quality_null_yields(r, "states", states)
-        quality_growth(r, f"states ({len(states) - 1} + DC)" if any(s.get("abbr") == "DC" for s in states)
-                       else "states", states)
+        quality_null_yields(r, "provinces", states)
+        quality_growth(r, "provinces", states)
     quality_rivers(r, ctx)
     run_builder_checks(r, web_dir, builder_checks_)
     return r

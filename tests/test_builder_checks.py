@@ -92,7 +92,7 @@ class CategoricalLensTest(unittest.TestCase):
                 "categories": [{"id": "a", "name": "A", "color": "#aa0000"}, {"id": "b", "name": "B", "color": "#00aa00"},
                                {"id": "c", "name": "C", "color": "#0000aa"}],
                 "note": "Counts congregations' adherents, not residents' beliefs.",
-                "higher_is": "neutral", "source": "acs_5yr", "description": "d", "values": [0, 1, None, 2, None, None]}
+                "higher_is": "neutral", "source": "cn_stats_city", "description": "d", "values": [0, 1, None, 2, None, None]}
 
     def run_lens(self, lens):
         web, interim = dataset()

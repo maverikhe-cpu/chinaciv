@@ -5,13 +5,17 @@ import math
 import unittest
 from pathlib import Path
 
+from pipeline.core.geo import MAP_HEIGHT_KM, MAP_WIDTH_KM
 from pipeline.core.hexgrid import HexGrid
 
 FIXTURE = Path(__file__).parent / "fixtures" / "hex_cases.json"
 
 
 class HexGridTest(unittest.TestCase):
-    grid = HexGrid(25.0, 117, 90)  # the production map size
+    grid = HexGrid.covering(MAP_WIDTH_KM, MAP_HEIGHT_KM, 25.0)  # the production map size (China frame)
+
+    def test_production_size(self):
+        self.assertEqual((self.grid.cols, self.grid.rows), (128, 120))
 
     def test_center_roundtrip(self):
         g = self.grid

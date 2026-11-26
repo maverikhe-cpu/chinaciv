@@ -26,7 +26,9 @@ const TILE_KM = 300;
 const DIR_COS = [0, 1, 2, 3, 4, 5].map((d) => Math.cos((d * Math.PI) / 3));
 const DIR_SIN = [0, 1, 2, 3, 4, 5].map((d) => Math.sin((d * Math.PI) / 3));
 
-export const ROAD_MIN_RPX = 10; // Interstates and main-line rail from the region view ("mid") in
+export const ROAD_MIN_RPX = 10; // expressways (Interstates) and conventional main-line rail from the region view ("mid") in
+export const HSR_MIN_RPX = 6.5; // high-speed rail already at the national view: it is the network that defines the map
+export const RAIL_MIN_RPX = HSR_MIN_RPX; // the rail layer's own threshold (HSR first, conventional rail from ROAD_MIN_RPX)
 export const MAJOR_MIN_RPX = 18; // major highways and secondary rail once hexes are big enough to read them
 export const RAIL2_MIN_RPX = 18;
 const DETAIL_RPX = 30; // cobbles, centre dashes, sleepers
@@ -93,22 +95,36 @@ function buildPieces(w, links, classes, offsetOf = null) {
 }
 
 /**
- * infrastructure.json → {roads: tiles, rail: tiles, roadLinks: Set, ports, airports, counts}.
- * Road classes: 0 Interstate, 1 major highway. Rail tiers: 0 main, 1 secondary.
+ * infrastructure.json → {roads: tiles, rail: tiles, hsr: tiles | null, roadLinks: Set, counts}.
+ * Road classes: 0 expressway / Interstate, 1 major highway. Rail tiers: by `rail_tiers` ids when the file has them
+ * (chinaciv: "hsr" 高速铁路 is drawn in its own bright style, "rail" 普速铁路 as main-line rail); otherwise (usaciv
+ * files) 0 main, 1 secondary.
  */
 export function prepareNetwork(w, infra) {
   const roads = Array.isArray(infra?.roads) ? infra.roads : [];
-  const rail = Array.isArray(infra?.rail) ? infra.rail : [];
+  let rail = Array.isArray(infra?.rail) ? infra.rail : [];
+  const tierIds = Array.isArray(infra?.rail_tiers) ? infra.rail_tiers.map((t) => t?.id) : [];
+  const hsrTier = tierIds.indexOf("hsr");
+  let hsr = [];
+  if (hsrTier >= 0) {
+    hsr = rail.filter((l) => l[2] === hsrTier);
+    // the remaining tiers map onto main (0) / secondary (1) in their file order
+    const rest = tierIds.map((_, k) => k).filter((k) => k !== hsrTier);
+    rail = rail.filter((l) => l[2] !== hsrTier).map((l) => [l[0], l[1], Math.min(1, Math.max(0, rest.indexOf(l[2]))), ...l.slice(3)]);
+  }
   const roadLinks = new Map(); // "a,b" → class
   for (const [a, b, cls] of roads) roadLinks.set(a < b ? `${a},${b}` : `${b},${a}`, cls);
   const R = w.grid.R;
   // Rail on a road link runs alongside it (a fifth of a hex to the side); elsewhere on the centre line.
   const railOff = (a, b) => (roadLinks.has(a < b ? `${a},${b}` : `${b},${a}`) ? 0.2 * R : 0);
+  // HSR beside a road shifts to the other side, so expressway, conventional rail and HSR can share a corridor.
+  const hsrOff = (a, b) => (roadLinks.has(a < b ? `${a},${b}` : `${b},${a}`) ? -0.2 * R : 0);
   return {
     roads: buildPieces(w, roads, [1, 0]),
     rail: buildPieces(w, rail, [1, 0], railOff),
+    hsr: hsr.length ? buildPieces(w, hsr.map((l) => [l[0], l[1], 0]), [0], hsrOff) : null,
     roadLinks,
-    counts: { roads: roads.length, rail: rail.length },
+    counts: { roads: roads.length, rail: rail.length, hsr: hsr.length },
   };
 }
 
@@ -185,9 +201,55 @@ export function drawRoads(ctx, net, vp, o) {
   ctx.globalAlpha = a0;
 }
 
-/** Railroads: a ballast bed, sleepers (near), a steel line with a bright edge. Secondary lines thinner, nearer. */
+/** Railroads: a ballast bed, sleepers (near), a steel line with a bright edge. Secondary lines thinner, nearer.
+ *  High-speed rail (net.hsr) goes on top in its own style: see drawHsr. */
 export function drawRail(ctx, net, vp, o) {
-  if (!net || o.Rpx < ROAD_MIN_RPX) return;
+  if (!net) return;
+  if (o.Rpx >= ROAD_MIN_RPX) drawConventionalRail(ctx, net, vp, o);
+  if (net.hsr) drawHsr(ctx, net, vp, o);
+}
+
+/**
+ * High-speed rail: a bright ivory line with a dark casing and short crimson ticks across it (sleepers drawn as
+ * a "speed" pattern), with a thin crimson centre line close in. Distinct from conventional rail (dark steel on a
+ * ballast bed) at every zoom; visible from the national view (HSR_MIN_RPX).
+ */
+export function drawHsr(ctx, net, vp, o) {
+  if (!net?.hsr || o.Rpx < HSR_MIN_RPX) return;
+  const s = vp.s, Rpx = o.Rpx;
+  const tiles = visibleTiles(net.hsr, vp, 2 * (Rpx / s));
+  if (!tiles.length) return;
+  const a0 = ctx.globalAlpha;
+  ctx.globalAlpha = a0 * clamp((Rpx - HSR_MIN_RPX) / 3, 0.6, 1);
+  const core = clamp(Rpx * 0.075, 1.3, 6);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "rgba(40,16,12,.78)";
+  ctx.lineWidth = (core + 2) / s;
+  strokeAll(ctx, tiles, 0);
+  ctx.strokeStyle = "#fbf3df";
+  ctx.lineWidth = core / s;
+  strokeAll(ctx, tiles, 0);
+  // ticks across the line: a dashed stroke wider than the core
+  if (Rpx >= 9) {
+    ctx.lineCap = "butt";
+    ctx.strokeStyle = "#d8382a";
+    ctx.lineWidth = (core + 2.6) / s;
+    const gap = clamp(Rpx * 0.22, 4, 14);
+    ctx.setLineDash([Math.max(1, core * 0.45) / s, gap / s]);
+    strokeAll(ctx, tiles, 0);
+    ctx.setLineDash([]);
+  }
+  if (Rpx >= 16) {
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(216,56,42,.85)";
+    ctx.lineWidth = Math.max(0.6, core * 0.22) / s;
+    strokeAll(ctx, tiles, 0);
+  }
+  ctx.globalAlpha = a0;
+}
+
+function drawConventionalRail(ctx, net, vp, o) {
   const s = vp.s, Rpx = o.Rpx;
   const tiles = visibleTiles(net.rail, vp, 2 * (Rpx / s));
   if (!tiles.length) return;
@@ -255,8 +317,12 @@ function inkStroke(g, upx, wPx = 1.1, col = "rgba(28,20,10,.9)") {
 
 // --- ports ----------------------------------------------------------------------------------------------------------
 
-/** 0: 100M+ short tons, 1: 25–100M, 2: under 25M (the research's tonnage tiers). */
+/** chinaciv `cargo_t` (tonnes): 0: 5亿 t+, 1: 2亿–5亿 t, 2: under 2亿 t. usaciv `tons` (short tons): 100M+, 25–100M, less. */
 export function portTier(p) {
+  if (p?.cargo_t != null) {
+    const t = p.cargo_t;
+    return t >= 5e8 ? 0 : t >= 2e8 ? 1 : 2;
+  }
   const t = p?.tons;
   return t == null ? 2 : t >= 1e8 ? 0 : t >= 2.5e7 ? 1 : 2;
 }

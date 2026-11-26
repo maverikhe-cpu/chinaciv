@@ -3,42 +3,54 @@
 
 // Industry → short label, district colour (the medallion behind its icon) and icon id (icons.js i-<key>).
 export const INDUSTRY = {
-  agriculture: { short: "Agriculture", color: "#4f7a2a" },
-  mining: { short: "Mining", color: "#6a5038" },
-  construction: { short: "Construction", color: "#8a5426" },
-  manufacturing: { short: "Manufacturing", color: "#9a5a22" },
-  wholesale: { short: "Wholesale", color: "#7a6420" },
-  retail: { short: "Retail", color: "#8a6a1e" },
-  transportation: { short: "Logistics", color: "#3d5f73" },
-  utilities: { short: "Utilities", color: "#2a5f86" },
-  information: { short: "Information", color: "#25557e" },
-  finance: { short: "Finance", color: "#7a6420" },
-  real_estate: { short: "Real estate", color: "#6b4a2f" },
-  professional: { short: "Professional", color: "#2b4f8a" },
-  management: { short: "Management", color: "#4a4a7a" },
-  admin: { short: "Admin services", color: "#4b5a68" },
-  education: { short: "Education", color: "#2a3f7a" },
-  health: { short: "Health care", color: "#7a2f2f" },
-  arts: { short: "Arts", color: "#5b3a7e" },
-  accommodation: { short: "Hospitality", color: "#6e3a5e" },
-  other: { short: "Other services", color: "#4b4b4b" },
-  public_admin: { short: "Government", color: "#3a5a4a" },
-  government: { short: "Government", color: "#3a5a4a" },
+  agriculture: { short: "农业", color: "#4f7a2a" },
+  mining: { short: "采矿", color: "#6a5038" },
+  construction: { short: "建筑", color: "#8a5426" },
+  manufacturing: { short: "制造", color: "#9a5a22" },
+  wholesale: { short: "批发", color: "#7a6420" },
+  retail: { short: "批发零售", color: "#8a6a1e" },
+  transportation: { short: "交通物流", color: "#3d5f73" },
+  utilities: { short: "公用事业", color: "#2a5f86" },
+  information: { short: "信息技术", color: "#25557e" },
+  finance: { short: "金融", color: "#7a6420" },
+  real_estate: { short: "房地产", color: "#6b4a2f" },
+  professional: { short: "科研技术", color: "#2b4f8a" },
+  management: { short: "企业管理", color: "#4a4a7a" },
+  admin: { short: "商务服务", color: "#4b5a68" },
+  education: { short: "教育", color: "#2a3f7a" },
+  health: { short: "卫生", color: "#7a2f2f" },
+  arts: { short: "文体娱乐", color: "#5b3a7e" },
+  accommodation: { short: "住宿餐饮", color: "#6e3a5e" },
+  other: { short: "居民服务", color: "#4b4b4b" },
+  public_admin: { short: "公共管理", color: "#3a5a4a" },
+  government: { short: "政府", color: "#3a5a4a" },
+  // three-sector GDP (chinaciv gdp_by_industry)
+  primary: { short: "第一产业", color: "#4f7a2a", icon: "y-food" },
+  secondary: { short: "第二产业", color: "#8a5426", icon: "y-production" },
+  tertiary: { short: "第三产业", color: "#7a6420", icon: "y-gold" },
 };
-export const industryIcon = (k) => `i-${k === "government" ? "public_admin" : k}`;
+// GB/T 4754 sections A–S (chinaciv jobs keys) → the usaciv industry whose glyph and colour fit.
+const SECTION = {
+  A: "agriculture", B: "mining", C: "manufacturing", D: "utilities", E: "construction", F: "retail", G: "transportation",
+  H: "accommodation", I: "information", J: "finance", K: "real_estate", L: "admin", M: "professional", N: "utilities",
+  O: "other", P: "education", Q: "health", R: "arts", S: "public_admin",
+};
+const base = (k) => SECTION[k] || k;
+const info = (k) => INDUSTRY[k] || INDUSTRY[base(k)];
+export const industryIcon = (k) => INDUSTRY[k]?.icon || `i-${base(k) === "government" ? "public_admin" : base(k)}`;
 
 // Land-use groups shown as a hex's "tile yield" (world.json pct keys → group). Cover ids give the map colour.
 export const LAND = [
-  { key: "built", label: "Built-up", icon: "l-developed", cover: 9, keys: ["developed"] },
-  { key: "farm", label: "Farmland", icon: "l-farmland", cover: 7, keys: ["crop", "pasture"] },
-  { key: "forest", label: "Forest", icon: "l-forest", cover: 3, keys: ["forest"] },
-  { key: "open", label: "Open land", icon: null, cover: 4, keys: ["grass", "shrub", "wetland"] },
+  { key: "built", label: "建成区", icon: "l-developed", cover: 9, keys: ["developed"] },
+  { key: "farm", label: "耕地", icon: "l-farmland", cover: 7, keys: ["crop", "pasture"] },
+  { key: "forest", label: "森林", icon: "l-forest", cover: 3, keys: ["forest"] },
+  { key: "open", label: "草地与荒地", icon: null, cover: 4, keys: ["grass", "shrub", "wetland"] },
 ];
 
 const sum = (o) => Object.values(o || {}).reduce((a, v) => a + (Number.isFinite(v) ? v : 0), 0);
 const HEX_AREA = (R) => (3 * Math.sqrt(3) / 2) * R * R; // km² of one hex
 
-/** Industries by jobs (ACS C24030, where residents work) with location quotients vs the nation. */
+/** Industries by employment (cities.json jobs) with location quotients vs the nation. */
 export function jobIndustries(city, nation) {
   const n = nation.nation;
   const total = city.employed || sum(city.jobs) || 1;
@@ -50,14 +62,14 @@ export function jobIndustries(city, nation) {
       const natShare = (n.jobs?.[key] || 0) / nTotal;
       return {
         key, jobs, share, natShare, lq: natShare > 0 ? share / natShare : null,
-        label: nation.industries?.[key] || key, short: INDUSTRY[key]?.short || key,
-        color: INDUSTRY[key]?.color || "#3a4a5e", icon: industryIcon(key),
+        label: nation.industries?.[key] || key, short: info(key)?.short || nation.industries?.[key] || key,
+        color: info(key)?.color || "#3a4a5e", icon: industryIcon(key),
       };
     })
     .sort((a, b) => b.jobs - a.jobs);
 }
 
-/** GDP by industry (BEA CAGDP2) with shares and location quotients vs U.S. GDP shares. */
+/** GDP by industry (chinaciv: the three sectors) with shares and location quotients vs national GDP shares. */
 export function gdpIndustries(city, nation) {
   const g = city.gdp_by_industry;
   const ng = nation.nation.gdp_by_industry || {};
@@ -73,8 +85,8 @@ export function gdpIndustries(city, nation) {
       const share = value / total, natShare = (ng[key] || 0) / nTotal;
       return {
         key, value, share, natShare, lq: natShare > 0 ? share / natShare : null, estimated: est.has(key),
-        label: key === "government" ? "Government" : nation.industries?.[key] || key,
-        short: INDUSTRY[key]?.short || key, color: INDUSTRY[key]?.color || "#3a4a5e", icon: industryIcon(key),
+        label: INDUSTRY[key]?.short && ["primary", "secondary", "tertiary"].includes(key) ? `${INDUSTRY[key].short}增加值` : key === "government" ? "政府" : nation.industries?.[key] || key,
+        short: info(key)?.short || key, color: info(key)?.color || "#3a4a5e", icon: industryIcon(key),
       };
     })
     .sort((a, b) => b.value - a.value);
@@ -85,7 +97,7 @@ export function gdpIndustries(city, nation) {
     const missing = Object.entries(g).filter(([, v]) => v == null).map(([k]) => k);
     rows.push({
       key: "undisclosed", value: und, share: und / total, natShare: 0, lq: null, undisclosed: true, missing,
-      label: "Undisclosed by BEA", short: "Undisclosed", color: "#4a5260", icon: "lock",
+      label: "未公开", short: "未公开", color: "#4a5260", icon: "lock",
     });
   }
   return rows;
@@ -177,17 +189,30 @@ export function buildModel(app, city) {
   }
 
   const peers = (city.peers || []).map((id) => app.cityById.get(id)).filter(Boolean);
-  const states = (city.states || []).map((abbr) => {
-    const i = w.raw.states.findIndex((s) => s.abbr === abbr);
-    return { abbr, index: i, name: i >= 0 ? (app.data.states?.[i]?.name || w.raw.states[i].name) : abbr };
+  // cities.json `states`: province codes (chinaciv) or postal codes (usaciv test data)
+  const states = (city.states || []).map((ref) => {
+    const i = w.raw.states.findIndex((s) => s.fips === ref || s.abbr === ref);
+    const st = i >= 0 ? w.raw.states[i] : null;
+    return { abbr: ref, index: i, name: st ? (app.data.states?.[i]?.full || st.full || app.data.states?.[i]?.name || st.name) : ref };
   });
+  // Transport hubs and wonders in the city (infrastructure.json / wonders.json rows whose cbsa is the city).
+  const infra = app.data.infrastructure || null;
+  const hubs = [
+    ...(infra?.airports || []).filter((a) => a.cbsa === city.id).map((a) => ({ kind: "airport", item: a })),
+    ...(infra?.ports || []).filter((p) => p.cbsa === city.id).map((p) => ({ kind: "port", item: p })),
+  ];
+  const wonders = (app.data.wonders?.wonders || []).filter((x) => x.cbsa === city.id);
   const residentsSum = tiles.reduce((a, t) => a + (t.residents || 0), 0);
 
   return {
     city, N, nation, stateIdx, hexArea: area, stateRGB, states, footprint, mask, tiles, residentsSum,
-    sites, siteCells, inds, gdpInds, free, districts: [], placed: [], inCity: [],
+    sites, siteCells, inds, gdpInds, free, districts: [], placed: [], inCity: [], hubs, wonders,
     bbox: Number.isFinite(x0) ? { x0, y0, x1, y1 } : null,
     peers,
+    provinceName: (ref) => {
+      const st = w.raw.states.find((x) => x.fips === ref || x.abbr === ref);
+      return st ? st.name : ref;
+    },
   };
 }
 
@@ -224,14 +249,14 @@ export function rankCount(cities, key) {
   return n;
 }
 
-/** A resource value with its unit, short ("3.9 GW", "878 jobs"). */
+/** A resource value with its unit, short ("3.9 GW", "120万 t/yr"). */
 export function resourceValue(item, type, compact) {
   const v = item.value;
   if (!Number.isFinite(v)) return "";
   const u = type?.unit || "";
   if (u === "MW") return v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)} GW` : `${Math.round(v)} MW`;
-  if (u === "employees") return `${compact(v)} workers`;
-  if (/tons/.test(u)) return `${compact(v)} t/yr`;
-  if (/km²/.test(u)) return `${compact(v)} km² play`;
+  if (u === "employees") return `${compact(v)} 人`;
+  if (/tons|^t\b|t\/yr|吨/.test(u)) return `${compact(v)} ${/yr|年/.test(u) ? "吨/年" : "吨"}`;
+  if (/km²/.test(u)) return `${compact(v)} km²`;
   return `${compact(v)} ${u}`.trim();
 }

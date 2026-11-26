@@ -467,9 +467,10 @@ export function drawProtected(ctx, sets, vp, o) {
 // --- wonders --------------------------------------------------------------------------------------------------------
 
 export const WONDER_KINDS = {
-  natural: { name: "Natural wonder", ring: "#8fd07a", base: "#3f6a34", icon: "w-park" },
-  university: { name: "Great university", ring: "#8fb8ec", base: "#2c4a78", icon: "w-university" },
-  landmark: { name: "Landmark", ring: "#ecc46a", base: "#6a4a1c", icon: "w-landmark" },
+  natural: { name: "自然奇观", ring: "#8fd07a", base: "#3f6a34", icon: "w-park" },
+  monument: { name: "文化奇观", ring: "#e8a868", base: "#6a2e1c", icon: "w-landmark" },
+  university: { name: "一流大学", ring: "#8fb8ec", base: "#2c4a78", icon: "w-university" },
+  landmark: { name: "名胜", ring: "#ecc46a", base: "#6a4a1c", icon: "w-landmark" },
 };
 
 /**
@@ -480,6 +481,7 @@ export const WONDER_MOTIFS = {
   natural: ["peak", "canyon", "forest", "desert", "geyser", "coast", "bridge", "dam", "arch", "obelisk"],
   university: ["hall", "redhall", "spire"],
   landmark: ["statue", "mission", "gantry", "mound", "adobe", "ballpark", "brickhall", "rotunda", "carved", "quarter", "flight", "spike", "dam", "obelisk", "arch", "memorial"],
+  monument: ["pagoda", "greatwall", "palace", "cave"],
 };
 export const MOTIF_LABELS = {
   peak: "Snow peak", canyon: "Canyon", forest: "Forest", desert: "Desert", geyser: "Hot springs & geysers", coast: "Coast & lighthouse",
@@ -487,8 +489,12 @@ export const MOTIF_LABELS = {
   spire: "Bell tower", statue: "Statue", mission: "Mission", gantry: "Launch tower", mound: "Earth mound", adobe: "Pueblo",
   ballpark: "Ballpark", brickhall: "Brick hall", rotunda: "Rotunda", carved: "Carved mountain", quarter: "Old quarter",
   flight: "First flight", spike: "Golden spike", memorial: "Memorial arch",
+  pagoda: "宝塔", greatwall: "长城", palace: "殿宇", cave: "石窟",
 };
-const FALLBACK = { natural: ["peak", "forest", "canyon"], university: ["hall", "redhall", "spire"], landmark: ["obelisk", "memorial", "rotunda"] };
+const FALLBACK = {
+  natural: ["peak", "forest", "canyon"], university: ["hall", "redhall", "spire"], landmark: ["pagoda", "palace", "memorial"],
+  monument: ["pagoda", "palace", "greatwall"],
+};
 
 /**
  * A wonder tile: a raised round plinth with a gold rim (the wonder "seal"), and the wonder itself on top, drawn from
@@ -1264,11 +1270,115 @@ const MOTIF_PAINT = {
   statue: paintStatue, mission: paintMission, gantry: paintGantry, mound: paintMound, adobe: paintAdobe,
   ballpark: paintBallpark, brickhall: paintBrickHall, carved: paintCarved, quarter: paintQuarter, flight: paintFlight,
   spike: paintSpike,
+  pagoda: paintPagoda, greatwall: paintGreatWall, palace: paintPalace, cave: paintCave,
 };
+
+// --- Chinese monuments ------------------------------------------------------------------------------------------------
+
+/** A tiered pagoda: five storeys of upturned eaves on a red body, with a finial. */
+function paintPagoda(g, upx) {
+  const tiers = 5;
+  for (let k = 0; k < tiers; k++) {
+    const y1 = 0.36 - k * 0.27, y0 = y1 - 0.2, hw = 0.4 - k * 0.055;
+    g.fillStyle = k % 2 ? "#a8352a" : "#b8402f";
+    g.fillRect(-hw * 0.7, y0, hw * 1.4, y1 - y0);
+    ink(g, upx, 0.7);
+    // eave: a dark roof with upturned tips
+    g.beginPath();
+    g.moveTo(-hw - 0.14, y0 + 0.02);
+    g.quadraticCurveTo(-hw * 0.6, y0 + 0.06, -hw * 0.5, y0 - 0.06);
+    g.lineTo(hw * 0.5, y0 - 0.06);
+    g.quadraticCurveTo(hw * 0.6, y0 + 0.06, hw + 0.14, y0 + 0.02);
+    g.lineTo(hw * 0.7, y0 + 0.05);
+    g.lineTo(-hw * 0.7, y0 + 0.05);
+    g.closePath();
+    g.fillStyle = "#2e3a3a";
+    g.fill();
+    ink(g, upx, 0.8);
+  }
+  g.fillStyle = "#e6c25a";
+  g.fillRect(-0.03, -1.22, 0.06, 0.28);
+  g.beginPath();
+  g.arc(0, -1.22, 0.06, 0, TAU);
+  g.fill();
+  ink(g, upx, 0.7);
+}
+
+/** A stretch of the Great Wall over a ridge, with a watchtower. */
+function paintGreatWall(g, upx) {
+  g.fillStyle = "#6f7f4a";
+  g.beginPath();
+  g.moveTo(-0.95, 0.36); g.quadraticCurveTo(-0.4, -0.5, 0.1, -0.2); g.quadraticCurveTo(0.6, 0.05, 0.95, -0.35); g.lineTo(0.95, 0.36); g.closePath();
+  g.fill();
+  ink(g, upx, 0.9);
+  // the wall along the crest
+  g.beginPath();
+  g.moveTo(-0.92, 0.2); g.quadraticCurveTo(-0.4, -0.62, 0.1, -0.32); g.quadraticCurveTo(0.6, -0.06, 0.94, -0.46);
+  g.strokeStyle = "rgba(28,20,10,.9)";
+  g.lineWidth = 0.2;
+  g.stroke();
+  g.strokeStyle = "#c9b48a";
+  g.lineWidth = 0.13;
+  g.stroke();
+  g.setLineDash([0.05, 0.05]);
+  g.strokeStyle = "#8a7552";
+  g.lineWidth = 0.05;
+  g.stroke();
+  g.setLineDash([]);
+  // watchtower
+  g.fillStyle = "#cdb98e";
+  g.fillRect(-0.02, -0.78, 0.3, 0.42);
+  ink(g, upx, 0.9);
+  g.fillStyle = "#2a2018";
+  g.fillRect(0.07, -0.62, 0.1, 0.14);
+}
+
+/** A palace hall: a hipped golden roof on red columns over a white terrace. */
+function paintPalace(g, upx) {
+  g.fillStyle = "#e8e0cc";
+  g.fillRect(-0.82, 0.12, 1.64, 0.22);
+  ink(g, upx, 0.8);
+  g.fillStyle = "#b8362a";
+  g.fillRect(-0.6, -0.32, 1.2, 0.44);
+  ink(g, upx, 0.8);
+  g.fillStyle = "rgba(40,10,6,.5)";
+  for (const x of [-0.42, -0.14, 0.14, 0.42]) g.fillRect(x - 0.03, -0.3, 0.06, 0.42);
+  // double-eave roof
+  for (const [y, hw] of [[-0.32, 0.86], [-0.66, 0.6]]) {
+    g.beginPath();
+    g.moveTo(-hw - 0.08, y + 0.02);
+    g.quadraticCurveTo(-hw * 0.6, y, -hw * 0.5, y - 0.26);
+    g.lineTo(hw * 0.5, y - 0.26);
+    g.quadraticCurveTo(hw * 0.6, y, hw + 0.08, y + 0.02);
+    g.closePath();
+    g.fillStyle = "#e0b23e";
+    g.fill();
+    ink(g, upx, 0.9);
+  }
+  g.fillStyle = "#b8362a";
+  g.fillRect(-0.36, -0.68, 0.72, 0.12);
+}
+
+/** Grotto cliff: a sandstone face with niches and a seated figure (石窟). */
+function paintCave(g, upx) {
+  g.fillStyle = "#c49a6a";
+  g.beginPath();
+  g.moveTo(-0.92, 0.36); g.lineTo(-0.8, -0.7); g.lineTo(-0.2, -0.95); g.lineTo(0.5, -0.85); g.lineTo(0.9, -0.5); g.lineTo(0.92, 0.36); g.closePath();
+  g.fill();
+  ink(g, upx, 1);
+  g.fillStyle = "#4a2e1c";
+  for (const [x, y, r] of [[-0.55, -0.35, 0.13], [0.5, -0.4, 0.12], [-0.5, 0.05, 0.1], [0.55, 0.02, 0.1]]) {
+    g.beginPath(); g.ellipse(x, y, r * 0.8, r, 0, 0, TAU); g.fill();
+  }
+  g.beginPath(); g.ellipse(0, -0.2, 0.3, 0.42, 0, 0, TAU); g.fillStyle = "#3a2416"; g.fill(); ink(g, upx, 0.8);
+  g.fillStyle = "#d9b98a";
+  g.beginPath(); g.arc(0, -0.38, 0.08, 0, TAU); g.fill();
+  g.beginPath(); g.ellipse(0, -0.1, 0.17, 0.2, 0, 0, TAU); g.fill();
+}
 
 // --- plaques --------------------------------------------------------------------------------------------------------
 
-const PLAQUE_FONT = '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif';
+const PLAQUE_FONT = '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, SimSun, serif';
 
 /**
  * A name plate centred under (x, y) in screen css px (call with a screen transform): dark bronze plate, gold rim, the

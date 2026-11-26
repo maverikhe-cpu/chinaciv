@@ -1,9 +1,10 @@
-// The map-art model: turns the optional map-layer files (infrastructure, military, wonders, trade) into what the layers
+// The map-art model: turns the optional map-layer files (infrastructure, wonders) into what the layers
 // draw, once per data arrival, and decides where each site stands inside its hex so sites never sit on a city tile
 // or on each other.
 //
 //   createModel(w) → model; model.setData(name, data) (re-runs the placement); model.version (bumps on change)
-//   model fields: net, ports, airports, installations, ranges (cell sets), parks (cell sets), wonders, routes, data
+//   model fields: net, ports, airports, parks (cell sets), wonders, data (installations / ranges / routes stay empty:
+//   chinaciv phase 1 has no military or trade data)
 //   each site item: {kind, data, cell, x, y (km, where it is drawn), size(Rpx) → css px, minRpx, prio}
 //   visibleSites(model, layerId, Rpx) → items drawn at this zoom (decluttered, cached per zoom bucket)
 //   wonderMotif(wonder) → the sprite motif for a wonders.json row (WONDER_MOTIF_BY_ID, else a generic one by kind)
@@ -11,8 +12,8 @@
 // Sites whose true hex is a city tile (or a big metro's spill tile, or the hexes its banner covers) are drawn on the
 // nearest free hex one ring out, leaning toward their true point; item.cell stays the true hex and item.drawCell is
 // where the glyph stands (item.nudged = true). Tooltips always describe the true site.
-import { prepareNetwork, prepareRoutes, portTier, airportTier } from "../../render/art/improvements.js";
-import { prepareCellSet, fortKind, isAirfieldName } from "../../render/art/sites.js";
+import { prepareNetwork, portTier, airportTier } from "../../render/art/improvements.js";
+import { prepareCellSet } from "../../render/art/sites.js";
 import { metroSpill } from "../../render/art/city.js";
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -39,9 +40,22 @@ export const WONDER_MOTIF_BY_ID = {
 };
 const UNI_MOTIFS = ["hall", "redhall", "spire"];
 
+// Chinese wonders: a motif from words in the name (checked in order), so 长城 is a wall and 莫高窟 a grotto.
+const MOTIF_BY_WORD = [
+  [/长城|关$|山海关|嘉峪关/, "greatwall"], [/石窟|窟|石刻|大佛/, "cave"], [/塔/, "pagoda"],
+  [/宫|故宫|殿|府|陵|坛|寺|庙|观|祠|孔|园林|古城|古村|土楼|遗址|书院|大运河|丝绸之路|街区/, "palace"],
+  [/峰|山|岳|雪|冰川|高原|昆仑|珠穆朗玛/, "peak"], [/峡|谷|喀斯特|丹霞|石林|地质/, "canyon"],
+  [/森林|林|雨林|熊猫|湿地|三江源|保护区/, "forest"], [/沙漠|戈壁|沙/, "desert"], [/湖|泉|瀑|九寨|黄龙/, "geyser"],
+  [/海|岛|湾|滩/, "coast"], [/坝|水利|都江堰/, "dam"], [/桥/, "bridge"],
+];
+
 export function wonderMotif(x) {
   const m = WONDER_MOTIF_BY_ID[x?.id];
   if (m) return m;
+  const name = String(x?.name || "");
+  if (x?.kind !== "university" && /[\u3400-\u9fff]/.test(name)) {
+    for (const [re, motif] of MOTIF_BY_WORD) if (re.test(name)) return motif;
+  }
   if (x?.kind === "university") return UNI_MOTIFS[hashStr(x.id) % 3];
   return null; // drawWonder falls back to a generic motif by kind and variant
 }
@@ -55,7 +69,7 @@ const RING = ring(0.52), CITY_RING = ring(0.64);
 // Zoom rules (hex radius in css px) and sizes (css px), per site kind. Exported for the gallery and the docs.
 export const SITE_RULES = {
   port: {
-    minRpx: (p) => (p.rank <= 12 ? 10 : p.rank <= 50 ? 22 : 40),
+    minRpx: (p) => (p.rank <= 10 ? 8 : p.rank <= 30 ? 14 : 30),
     size: (tier, Rpx) => clamp(Rpx * [1.0, 0.86, 0.72][tier], 13, [66, 58, 50][tier]),
   },
   airport: {
@@ -91,13 +105,6 @@ export function createModel(w) {
         const tier = airportTier(a);
         return { kind: "airport", data: a, cell: a.cell, tier, prio: 400 + tier * 1000 + k, minRpx: SITE_RULES.airport.minRpx(tier), pref: towards(w, a, 30) };
       });
-    } else if (name === "military") {
-      m.installations = (data?.installations || []).filter(okCell(w)).map((f, k) => ({
-        kind: "fort", data: f, cell: f.cell, tier: f.tier, fort: fortKind(f.component), prio: 200 + k,
-        minRpx: SITE_RULES.fort.minRpx(f), pref: 150, muted: f.status && f.status !== "act", coastal: nearWater(w, f.cell), airfield: isAirfieldName(f.name),
-      }));
-      m.ranges = (data?.ranges || []).filter((r) => Array.isArray(r.cells) && r.cells.length).map((r) => ({ range: r, ...prepareCellSet(w, r.cells) }));
-      m.rangeById = new Map(m.ranges.map((r) => [r.range.id, r]));
     } else if (name === "wonders") {
       m.wonders = (data?.wonders || []).filter(okCell(w)).map((x, k) => ({
         kind: "wonder", data: x, cell: x.cell, wkind: x.kind, prio: (x.rank || 99) * 4 + k * 0.01, minRpx: SITE_RULES.wonder.minRpx(),
@@ -105,8 +112,6 @@ export function createModel(w) {
       }));
       m.parks = (data?.wonders || []).filter((x) => x.kind === "natural" && Array.isArray(x.cells) && x.cells.length > 1)
         .map((x) => ({ wonder: x, ...prepareCellSet(w, x.cells) }));
-    } else if (name === "trade") {
-      m.routes = data ? prepareRoutes(w, data) : [];
     }
     place(m);
     m._vis.clear();
@@ -141,15 +146,6 @@ function waterAngle(w, p) {
     if (j >= 0 && w.water?.[j]) return d * 60;
   }
   return 90;
-}
-
-function nearWater(w, cell) {
-  if (w.water?.[cell]) return true;
-  for (let d = 0; d < 6; d++) {
-    const j = w.grid.neighbour(cell, d);
-    if (j >= 0 && w.water?.[j]) return true;
-  }
-  return false;
 }
 
 const angDist = (a, b) => {

@@ -1,11 +1,13 @@
 // Share popover: copy a link to the current view, or download a 1600×900 PNG of it with a caption strip.
 import { drawIcon, hasIcon } from "../icons.js";
 import { icon } from "../ui/icon.js";
+import { SERIF, SANS } from "../format.js";
+import { NOTICE_TEXT } from "./help.js";
 
-// The address printed on shared images. Set it to the published site (e.g. "example.com/us-atlas"); when left
-// empty, the page's own host and path are used, except on a local dev server, where SITE_FALLBACK is printed.
-export const SITE_URL = "karpathy.ai/usaciv";
-const SITE_FALLBACK = "usaciv";
+// The address printed on shared images. Left empty (local, private use): the page's own host and path are used,
+// except on a local dev server, where SITE_FALLBACK is printed. Set it (e.g. "example.com/chinaciv") if you publish.
+export const SITE_URL = "";
+const SITE_FALLBACK = "chinaciv（本地）";
 
 export function siteLabel() {
   if (SITE_URL) return SITE_URL;
@@ -23,9 +25,7 @@ export function siteLabel() {
 export const IMG_W = 1600;
 export const IMG_H = 900;
 export const CAPTION_H = 118;
-const SERIF = '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif';
-const SANS = '-apple-system, "Segoe UI", system-ui, sans-serif';
-const CREDIT = "Data: Census ACS, BEA, NOAA, USGS/MRLC, EIA, Natural Earth";
+const CREDIT = "数据：国家统计局、交通运输部、中国民用航空局、NOAA ETOPO、Natural Earth 等（详见百科）";
 
 async function copyText(text) {
   try {
@@ -56,7 +56,7 @@ function spaced(ctx, px) {
 /**
  * Compose the share image.
  * info: {renderMap(canvas, w, h) → bool, lens (lens object or null), formatValue(lens, t) → string,
- *        selection: {kind, name, sub} | null}
+ *        selection: {kind, name, sub} | null, notice: string (the map notice footnote)}
  */
 export function composeImage(info, { height = IMG_H } = {}) {
   const imgH = Math.max(CAPTION_H + 100, Math.round(height)); // a shorter frame serves 1.91:1 social cards
@@ -107,19 +107,19 @@ export function composeImage(info, { height = IMG_H } = {}) {
   ctx.fill();
   ctx.beginPath();
   ctx.arc(ex, cy, 24.5, 0, Math.PI * 2);
-  ctx.fillStyle = "#2a4d8f";
+  ctx.fillStyle = "#a3271c";
   ctx.fill();
-  star(ctx, ex, cy + 1, 14, 6, "#f8f0d8");
+  star(ctx, ex, cy + 1, 14, 6, "#f8e08a");
 
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = "#ecd08e";
   ctx.font = `bold 36px ${SERIF}`;
-  spaced(ctx, 5);
-  ctx.fillText("UNITED STATES", 112, cy + 2);
+  spaced(ctx, 8);
+  ctx.fillText("文明中国", 112, cy + 2);
   spaced(ctx, 0);
   ctx.fillStyle = "#b9ab88";
-  ctx.font = `italic 17px ${SERIF}`;
-  ctx.fillText("A strategy-map atlas of the real economy", 114, cy + 28);
+  ctx.font = `17px ${SERIF}`;
+  ctx.fillText("用真实数据绘制的策略游戏地图", 114, cy + 28);
 
   // Lens + legend ramp
   const mx = 640;
@@ -130,7 +130,7 @@ export function composeImage(info, { height = IMG_H } = {}) {
   ctx.fillStyle = "#ecd08e";
   ctx.font = `24px ${SERIF}`;
   spaced(ctx, 1.5);
-  ctx.fillText((lens ? lens.name : "Terrain").toUpperCase() + (lens ? " LENS" : ""), mx + 50, cy - 8);
+  ctx.fillText(lens ? `${lens.name} · 透镜` : "地形", mx + 50, cy - 8);
   spaced(ctx, 0);
   if (lens?.ramp?.length) {
     const rx = mx + 50, ry = cy + 4, rw = 330, rh = 12;
@@ -150,7 +150,7 @@ export function composeImage(info, { height = IMG_H } = {}) {
   } else {
     ctx.font = `15px ${SANS}`;
     ctx.fillStyle = "#b9ab88";
-    ctx.fillText("Land cover, relief, rivers and resources", mx + 50, cy + 16);
+    ctx.fillText("土地覆盖、地势、河流与资源", mx + 50, cy + 16);
   }
 
   // Selection, credits, site
@@ -161,7 +161,7 @@ export function composeImage(info, { height = IMG_H } = {}) {
     ctx.font = `13px ${SANS}`;
     ctx.fillStyle = "#b9ab88";
     spaced(ctx, 2);
-    ctx.fillText(sel.kind === "state" ? "STATE" : "CITY", rx, cy - 30);
+    ctx.fillText(sel.kind === "state" ? "省级行政区" : "城市", rx, cy - 30);
     spaced(ctx, 0);
     ctx.font = `bold 24px ${SERIF}`;
     ctx.fillStyle = "#f3e6c4";
@@ -176,6 +176,17 @@ export function composeImage(info, { height = IMG_H } = {}) {
   ctx.fillText(siteLabel(), rx, cy + 42);
   spaced(ctx, 0);
   ctx.textAlign = "left";
+
+  // The map notice as a small footnote on the map (docs/CN_PLAN.md §2.3), bottom-left above the caption strip.
+  const note = info.notice || NOTICE_TEXT;
+  ctx.font = `12px ${SANS}`;
+  const nw = Math.min(IMG_W - 40, ctx.measureText(note).width + 16);
+  ctx.fillStyle = "rgba(9,16,26,.72)";
+  ctx.fillRect(12, mapH - 28, nw, 20);
+  ctx.fillStyle = "#d8cba8";
+  ctx.textBaseline = "middle";
+  ctx.fillText(fit(ctx, note, nw - 16), 20, mapH - 18);
+  ctx.textBaseline = "alphabetic";
 
   // Thin gold frame around the whole picture
   ctx.strokeStyle = "rgba(201,164,92,.85)";
@@ -213,11 +224,11 @@ export function initShare(opts) {
   let restore = null;
 
   pop.innerHTML = `
-    <div class="sp-title">Share this view</div>
-    <button class="sp-item" data-act="copy">${icon("share", "🔗", { size: 16 })}<span>Copy link</span></button>
-    <button class="sp-item" data-act="image">${icon("terrain", "🖼️", { size: 16 })}<span>Download image <span class="muted">1600×900 PNG</span></span></button>
+    <div class="sp-title">分享当前视图</div>
+    <button class="sp-item" data-act="copy">${icon("share", "🔗", { size: 16 })}<span>复制链接</span></button>
+    <button class="sp-item" data-act="image">${icon("terrain", "🖼️", { size: 16 })}<span>下载图片 <span class="muted">1600×900 PNG</span></span></button>
     <div class="sp-status" role="status" aria-live="polite"></div>
-    <input class="sp-url" type="text" readonly hidden aria-label="Link to this view">`;
+    <input class="sp-url" type="text" readonly hidden aria-label="当前视图的链接">`;
   const status = pop.querySelector(".sp-status");
   const urlBox = pop.querySelector(".sp-url");
 
@@ -255,17 +266,17 @@ export function initShare(opts) {
       opts.beforeCopy?.();
       const link = location.href;
       if (await copyText(link)) {
-        status.textContent = "Link copied to the clipboard";
-        opts.onToast?.("Link copied");
+        status.textContent = "链接已复制到剪贴板";
+        opts.onToast?.("链接已复制");
       } else {
-        status.textContent = "Copy this link:";
+        status.textContent = "请复制此链接：";
         urlBox.hidden = false;
         urlBox.value = link;
         urlBox.focus();
         urlBox.select();
       }
     } else if (b.dataset.act === "image") {
-      status.textContent = "Drawing the map…";
+      status.textContent = "正在绘制地图……";
       await new Promise((r) => setTimeout(r, 30)); // let the status paint
       try {
         const cv = composeImage(opts.getInfo());
@@ -278,10 +289,10 @@ export function initShare(opts) {
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-        status.textContent = `Saved ${a.download}`;
+        status.textContent = `已保存 ${a.download}`;
       } catch (err) {
         console.warn(err);
-        status.textContent = "Could not create the image in this browser.";
+        status.textContent = "此浏览器无法生成图片。";
       }
     }
   });

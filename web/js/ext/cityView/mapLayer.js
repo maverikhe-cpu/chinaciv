@@ -7,8 +7,7 @@ import { compact } from "./fmt.js";
 import { css } from "../../color.js";
 import { LAND, resourceValue } from "./model.js";
 
-const SANS = "-apple-system, 'Segoe UI', system-ui, sans-serif";
-const SERIF = '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif';
+import { SANS, SERIF } from "../../format.js";
 const reduced = (() => {
   try { return matchMedia("(prefers-reduced-motion: reduce)"); } catch { return { matches: false }; }
 })();
@@ -254,7 +253,8 @@ export function createMapLayer(app, { focusRect = () => null } = {}) {
     if (Rpx >= 18) {
       const full = Rpx >= 30;
       const phone = cam.w <= 700;
-      let tiles = m.tiles.filter((t) => !t.isCity);
+      // only hexes with something to say (no density lens and no land-cover shares: no pills at all)
+      let tiles = m.tiles.filter((t) => !t.isCity && (t.residents != null || t.land));
       if (phone) tiles = [...tiles].sort((a, b) => (b.residents || 0) - (a.residents || 0)).slice(0, 5);
       const taken = [];
       for (const t of tiles) {

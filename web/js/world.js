@@ -10,7 +10,19 @@ export const FOREIGN = -2;
 // pct group → the cover id whose colour represents it (for blending mixed cells).
 const PCT_COVER = { forest: 3, crop: 7, pasture: 6, grass: 5, shrub: 4, wetland: 8, developed: 9 };
 
+const TAIWAN_DRAW_POP = 1.5e6;
+
 export function prepareWorld(world, cities, extras = {}) {
+  // Display size of a city (banner order, de-cluttering, city-tile size): the stats-year population, else the 2020
+  // census (shown dimmed on the banner, labelled in panels). Taiwan cities carry the 2023 household-registration
+  // population from Taiwan's own statistics (内政部户政司), so they follow the same size rules as every other city.
+  for (const c of cities || []) {
+    c.sizePop = c.population ?? c.pop_census_2020 ?? null;
+    c.sizeFromCensus = c.population == null && c.pop_census_2020 != null;
+    // Drawing weight only (banner order, tile size), never displayed: a fallback for a build whose Taiwan cities
+    // have no population, so they rank like a 1.5-million city instead of vanishing from the map.
+    c.drawPop = c.sizePop ?? (c.kind === "taiwan_city" ? TAIWAN_DRAW_POP : null);
+  }
   const grid = makeGrid(world.grid);
   const n = grid.size;
   const { owner, elev } = world;
@@ -60,7 +72,9 @@ export function prepareWorld(world, cities, extras = {}) {
 
   // Border segments, grouped for batched drawing. coastLines also carry the water-side normal for foam.
   const bands = new Map(); // stateIdx -> [x0,y0,x1,y1, ix0,iy0,ix1,iy1, ...]
-  const stateLines = [], nationLines = [], coastLines = [];
+  const stateLines = [], nationLines = [], undefinedLines = [], coastLines = [];
+  // Foreign hexes whose edges with Chinese hexes are 未定国界 (world.json boundary.undefined; see build/world.py).
+  const undefinedCells = new Set(world.boundary?.undefined || []);
   const INSET = 0.16;
   for (let i = 0; i < n; i++) {
     const o = owner[i];
@@ -76,7 +90,7 @@ export function prepareWorld(world, cities, extras = {}) {
       if (!bands.has(o)) bands.set(o, []);
       bands.get(o).push(...seg, cx + ax * (1 - INSET), cy + ay * (1 - INSET), cx + bx * (1 - INSET), cy + by * (1 - INSET));
       if (oj >= 0) { if (j > i) stateLines.push(...seg); }
-      else if (oj === FOREIGN) nationLines.push(...seg);
+      else if (oj === FOREIGN) (undefinedCells.has(j) ? undefinedLines : nationLines).push(...seg);
       else coastLines.push(...seg);
     }
   }
@@ -99,7 +113,9 @@ export function prepareWorld(world, cities, extras = {}) {
 
   const prepared = {
     raw: world, version: v2 ? 2 : 1, grid, water, relief, cover, pct, tables, shadeK, stateColor, bands,
-    stateLines, nationLines, coastLines, foreignCoast, cityByCell, coverRGB: null, stateLabels: null,
+    stateLines, nationLines, coastLines, foreignCoast, cityByCell,
+    // 国界 / 未定国界 as continuous polylines, so a dash pattern runs along the border instead of restarting per edge
+    nationPaths: chainSegs(nationLines), undefinedPaths: chainSegs(undefinedLines), coverRGB: null, stateLabels: null,
     resources: null, terrainColors: null, colors: null, rgb: null, dim: null,
   };
   prepared.coverRGB = tables.cover.reduce((a, t) => ((a[t.id] = t.color ? parseHex(t.color) : null), a), []);
@@ -110,7 +126,8 @@ export function prepareWorld(world, cities, extras = {}) {
   return prepared;
 }
 
-export const isCapital = (city) => (city.capital != null ? !!city.capital : city.id === "47900");
+// The national capital: cities.json `capital` (true for 北京 "110000" only); the id fallback covers older files.
+export const isCapital = (city) => (city.capital != null ? !!city.capital : city.id === "110000" || city.id === "47900");
 
 // --- tile colours ---------------------------------------------------------------------------------------------
 
@@ -288,7 +305,7 @@ function computeStateLabels(w) {
       return 3.46 * Math.sqrt(Math.max(vxx * uy * uy - 2 * vxy * ux * uy + vyy * ux * ux, 0)) + grid.W;
     };
     const depth = (dist[a] + 0.7) * 2 * grid.H; // how thick the state is at the anchor
-    const name = states[s].name.toUpperCase();
+    const name = String(states[s].name || "").toUpperCase(); // a no-op for Chinese names
     // Try the PCA angle (slightly preferred), horizontal and halfway; keep the largest text that stays inside.
     const tries = [angle, 0, angle / 2].filter((t, k, arr) => arr.findIndex((u) => Math.abs(u - t) < 0.03) === k);
     const bestFit = (text) => {
@@ -301,19 +318,26 @@ function computeStateLabels(w) {
       return pick;
     };
     let pick = bestFit(name);
-    // Names that cannot be set at a readable size fall back to the postal code (capped, so it stays modest).
-    if (pick.size < 18 && states[s].abbr) {
+    let abbr = false;
+    // Names that cannot be set at a readable size fall back to the short form (US postal code; for China the
+    // 简称, e.g. 沪, only when even a two-character name will not fit), capped so it stays modest.
+    const cjk = /[\u3400-\u9fff]/.test(name);
+    if (pick.size < (cjk ? 12 : 18) && states[s].abbr && states[s].abbr !== name) {
       pick = bestFit(states[s].abbr);
       pick.size = Math.min(pick.size, 40);
+      abbr = true;
     }
-    labels.push({ state: s, text: pick.text, x: pick.x, y: pick.y, angle: pick.angle, size: pick.size, depth: dist[a] });
+    labels.push({ state: s, text: pick.text, x: pick.x, y: pick.y, angle: pick.angle, size: pick.size, depth: dist[a], abbr });
   }
   return labels;
 }
 
-// State-name letter spacing (fraction of the font size); map.js draws with the same values.
-export const LABEL_FONT = '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif';
+// State-name letter spacing (fraction of the font size); map.js draws with the same values. Province names are
+// Chinese: spaced out like the province names on a printed atlas.
+export const LABEL_FONT = '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, SimSun, serif';
 export const LABEL_SPACING = 0.32;
+/** Rough width in em of one character of a label (CJK glyphs are a full em). */
+export const charEm = (ch) => (/[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(ch) ? 1 : 0.78);
 let measureCtx = null;
 /** Width of `text` in em at LABEL_FONT with LABEL_SPACING between letters (falls back to an estimate). */
 function labelEm(text) {
@@ -324,7 +348,7 @@ function labelEm(text) {
     for (const ch of text) wsum += measureCtx.measureText(ch).width;
     return wsum / 100 + LABEL_SPACING * (text.length - 1);
   } catch {
-    return text.length * 1.02;
+    return [...text].reduce((a, ch) => a + charEm(ch), 0) + LABEL_SPACING * (text.length - 1);
   }
 }
 
@@ -465,3 +489,44 @@ export function stateOutline(w, s) {
 }
 
 export { css };
+
+
+/** Join [x0,y0,x1,y1, …] segments that share endpoints into polylines [[x,y,x,y,…], …]. */
+export function chainSegs(segs) {
+  const key = (x, y) => `${Math.round(x * 10)},${Math.round(y * 10)}`;
+  const n = segs.length / 4;
+  const at = new Map(); // endpoint key → [segment indices]
+  for (let k = 0; k < n; k++) {
+    for (const e of [0, 2]) {
+      const kk = key(segs[4 * k + e], segs[4 * k + e + 1]);
+      if (!at.has(kk)) at.set(kk, []);
+      at.get(kk).push(k);
+    }
+  }
+  const used = new Uint8Array(n);
+  const out = [];
+  const extend = (pts, k0) => {
+    // walk from the polyline's last point through unused segments
+    for (;;) {
+      const x = pts[pts.length - 2], y = pts[pts.length - 1];
+      const next = (at.get(key(x, y)) || []).find((k) => !used[k]);
+      if (next == null) return;
+      used[next] = 1;
+      const a = [segs[4 * next], segs[4 * next + 1]], b = [segs[4 * next + 2], segs[4 * next + 3]];
+      const far = key(a[0], a[1]) === key(x, y) ? b : a;
+      pts.push(far[0], far[1]);
+    }
+  };
+  for (let k = 0; k < n; k++) {
+    if (used[k]) continue;
+    used[k] = 1;
+    const fwd = [segs[4 * k], segs[4 * k + 1], segs[4 * k + 2], segs[4 * k + 3]];
+    extend(fwd, k);
+    const back = [fwd[0], fwd[1]];
+    extend(back, k);
+    const pts = [];
+    for (let i = back.length - 2; i >= 2; i -= 2) pts.push(back[i], back[i + 1]);
+    out.push(pts.concat(fwd));
+  }
+  return out;
+}

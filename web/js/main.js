@@ -1,7 +1,7 @@
 import { Camera } from "./camera.js";
 import { prepareWorld, applyLens, stateIndex } from "./world.js";
 import * as mapRender from "./render/map.js";
-import { drawBanners } from "./render/banners.js";
+import { drawBanners, clearBannerCaches } from "./render/banners.js";
 import { renderTopbar } from "./ui/topbar.js";
 import { showCellTooltip, showCityTooltip, showHtmlTooltip, hideTooltip } from "./ui/tooltip.js";
 import { initLensDock, formatLensValue, lensValueAt } from "./ui/lenses.js";
@@ -18,7 +18,9 @@ import { drawHighlight, drawOverlays, invalidateHighlight, highlightBounds } fro
 import { resourceFilterSig, layerActive, layerError, Z as LAYER_Z } from "./render/map.js";
 import { installExtensions } from "./ext/index.js";
 import { initShare } from "./app/share.js";
-import { initHelp } from "./app/help.js";
+import { initHelp, NOTICE_TEXT } from "./app/help.js";
+import { setCurrency } from "./format.js";
+import { chinaMapLayers, insetBox } from "./render/china.js";
 
 const { drawStatic, drawOverlay, OCEAN_BG } = mapRender;
 
@@ -33,9 +35,10 @@ async function loadJSON(name, optional = false) {
   }
 }
 
-// Optional data files (docs/DATA_CONTRACTS.md). Small map-layer files are fetched right after the first frame; the
-// others only when something asks for them (app.loadData(name)). A missing file (404) loads as null.
-const EAGER_DATA = ["infrastructure", "military", "wonders", "trade"];
+// Optional data files (docs/DATA_CONTRACTS.md, docs/CN_PLAN.md §5). Small map-layer files are fetched right after the
+// first frame; the others only when something asks for them (app.loadData(name)). A missing file (404) loads as null.
+// Phase 1 has no military, trade, counties, citizens, districts or disasters files: nothing asks for them.
+const EAGER_DATA = ["infrastructure", "wonders"];
 const DATA_NAME = /^[a-z0-9_-]+$/;
 
 // render/snapshot.js draws a whole view into any canvas; optional, with a local fallback.
@@ -52,10 +55,13 @@ const isMobile = () => matchMedia("(max-width: 700px)").matches;
 async function main() {
   const [world, cities, nation, lenses, sources, resources, statesData] = await Promise.all([
     loadJSON("world"), loadJSON("cities"), loadJSON("nation"),
-    loadJSON("lenses", true), loadJSON("sources", true), loadJSON("resources", true), loadJSON("states", true),
+    // Phase 1 publishes no lenses.json (county-level lenses are out of scope), so it is not requested at all.
+    Promise.resolve(null), loadJSON("sources", true), loadJSON("resources", true), loadJSON("states", true),
   ]);
   const lensFile = lenses && Array.isArray(lenses.lenses) ? lenses : { vintage: "", groups: [], lenses: [] };
   const w = prepareWorld(world, cities, { resources });
+  // Money is yuan (nation.json currency "CNY"); the US test data (no currency, gold in "usd") keeps dollars.
+  setCurrency(nation.currency || ((nation.yields || []).some((y) => y.unit === "usd") ? "USD" : "CNY"));
   const state = {
     cities, lens: null, band: null, hoverCell: -1, selectedCity: null, selectedState: null, showResources: !!w.resources,
     highlight: null, // {cells?, cities?, states?, resources?, dimOthers?, color?} (render/overlays.js)
@@ -96,8 +102,8 @@ async function main() {
     requestDraw();
     url.schedule();
   });
-  const pedia = initPedia({ world, nation, lenses: lensFile, sources: sources || [], w, resources, states });
-  const help = initHelp();
+  const pedia = initPedia({ world, nation, lenses: lensFile, sources: sources || [], w, resources, states, getData: (n) => app.data?.[n] });
+  const help = initHelp({ notice: world.notice });
 
   // --- static layer cache ----------------------------------------------------------------------------------------
   // Tiles, glyphs, rivers, borders, labels and resources are rendered into an offscreen canvas covering the view
@@ -305,18 +311,27 @@ async function main() {
       if (y > y1) y1 = y;
     }
     if (!Number.isFinite(x0)) return { x0: HOME_M, y0: HOME_M, x1: world.width - HOME_M, y1: world.height - HOME_M };
+    // The 南海诸岛 inset belongs to the national view: keep it inside the home frame.
+    const ib = insetBox(world);
+    if (ib) { x0 = Math.min(x0, ib[0]); y0 = Math.min(y0, ib[1]); x1 = Math.max(x1, ib[2] - g.R); y1 = Math.max(y1, ib[3] - g.R); }
     return { x0: x0 - g.R, y0: y0 - g.R, x1: x1 + g.R, y1: y1 + g.R };
   })();
   // Portrait phones: the whole country would be a thin strip between big bands of fog, so start closer in.
   const isPortraitPhone = () => cam.w <= 700 && cam.h > cam.w * 1.15;
-  const PORTRAIT_ZOOM = 1.3; // the country fills the width (Maine and Washington crop a little; banners stay on screen)
+  const PORTRAIT_ZOOM = 1.2; // the country fills the width (the far west crops a little; the inset stays in view)
   // The scale that frames the whole land in the visible area (URL zoom levels are relative to it).
   const fitIn = (a, padFrac = 0.1) => {
     const padX = Math.min(HOME_PAD_X, (a.x1 - a.x0) * padFrac);
     const s = Math.min((a.x1 - a.x0 - 2 * padX) / (landBox.x1 - landBox.x0), (a.y1 - a.y0 - 2 * HOME_PAD_Y) / (landBox.y1 - landBox.y0));
     return s > 0 && Number.isFinite(s) ? s : cam.scale || 1;
   };
-  const fitScale = () => fitIn(visibleArea(false, false));
+  // Desktop: keep the land and the 南海诸岛 inset (lower right) clear of the lens dock along the bottom edge.
+  const HOME_DOCK_H = 50;
+  const homeArea = () => {
+    const a = visibleArea(false, false);
+    return isMobile() ? a : { ...a, y1: a.y1 - HOME_DOCK_H };
+  };
+  const fitScale = () => fitIn(homeArea());
   // The furthest zoom-out allowed: a bit beyond the home view, and always far enough that the whole country fits
   // beside open docks (an advisor dashboard at 1024 px leaves only ~560 px of map).
   function updateMinScale(fs = fitScale()) {
@@ -329,8 +344,16 @@ async function main() {
   function homeView() {
     const fs = fitScale();
     const s = isPortraitPhone() ? fs * PORTRAIT_ZOOM : fs;
-    const a = visibleArea(false, false);
-    const cx = (landBox.x0 + landBox.x1) / 2, cy = (landBox.y0 + landBox.y1) / 2;
+    const a = homeArea();
+    let cx = (landBox.x0 + landBox.x1) / 2;
+    const cy = (landBox.y0 + landBox.y1) / 2;
+    // Portrait phones start zoomed in, which crops the sides: keep the right edge (the 南海诸岛 inset with the whole
+    // 断续线, required on the national view) inside the frame and let the far west crop instead.
+    const ib = insetBox(world);
+    if (isPortraitPhone() && ib) {
+      const halfW = (a.x1 - a.x0) / 2 / s;
+      cx = Math.min(cx, ib[2] + 6 / s - halfW);
+    }
     // Put the land's centre in the middle of the visible area, not of the whole canvas.
     return { x: cx - ((a.x0 + a.x1) / 2 - cam.w / 2) / s, y: cy - ((a.y0 + a.y1) / 2 - cam.h / 2) / s, s, fs };
   }
@@ -530,19 +553,19 @@ async function main() {
     announceEl.textContent = "";
     setTimeout(() => (announceEl.textContent = text), 30);
   };
-  const stateName = (idx) => states?.[idx]?.name || w.raw.states[idx]?.name || "State";
+  const stateName = (idx) => states?.[idx]?.name || w.raw.states[idx]?.name || "省份";
 
   function describeCanvas() {
-    const parts = ["Hex map of the contiguous United States", state.lens ? `coloured by the ${state.lens.name} lens` : "showing terrain"];
-    if (state.selectedCity) parts.push(`${state.selectedCity.name} selected`);
-    else if (state.selectedState != null) parts.push(`${stateName(state.selectedState)} selected`);
-    canvas.setAttribute("aria-label", parts.join(", "));
+    const parts = ["中国六边形地图", state.lens ? `按“${state.lens.name}”透镜着色` : "显示地形"];
+    if (state.selectedCity) parts.push(`已选中${state.selectedCity.name}`);
+    else if (state.selectedState != null) parts.push(`已选中${stateName(state.selectedState)}`);
+    canvas.setAttribute("aria-label", parts.join("，"));
   }
 
   const panelCtx = () => ({
     w, nation, states, cities,
     onClose: () => clearSelection(),
-    onPedia: () => pedia.open("Yields"),
+    onPedia: () => pedia.open("yields"),
     onState: (idx) => selectState(idx, { fly: true }),
     onCity: (city) => selectCity(city, { fly: true }),
   });
@@ -553,7 +576,7 @@ async function main() {
     state.selectedState = null;
     app.panels.city(city, panelCtx());
     if (fly && city.cell != null) focusCity(city);
-    announce(`${city.name} selected. ${city.full || ""}`);
+    announce(`已选中${city.name}。${city.full || ""}`);
     afterSelect();
   }
 
@@ -563,7 +586,7 @@ async function main() {
     state.selectedState = idx;
     app.panels.state(idx, panelCtx());
     if (fly) focusState(idx);
-    announce(`${stateName(idx)} selected.`);
+    announce(`已选中${stateName(idx)}。`);
     afterSelect();
   }
 
@@ -572,7 +595,7 @@ async function main() {
     state.selectedCity = null;
     state.selectedState = null;
     app.panels.close();
-    if (had) announce("Selection closed.");
+    if (had) announce("已取消选择。");
     afterSelect();
   }
 
@@ -594,16 +617,19 @@ async function main() {
   installSheetSwipe(() => clearSelection());
 
   // --- URL state -------------------------------------------------------------------------------------------------
-  // #state= accepts a FIPS code ("48", "6"), a postal code ("TX", "tx") or a name ("Texas"). Links keep the form
-  // they were opened with; the app itself writes FIPS.
+  // #state= accepts a province code ("44"; a 6-digit adcode "440000" too), a 简称 ("粤") or a name ("广东", "广东省").
+  // Links keep the form they were opened with; the app itself writes the code.
   function stateFromHash(ref) {
-    const t = String(ref ?? "").trim();
+    let t = String(ref ?? "").trim();
+    try { t = decodeURIComponent(t); } catch { /* already decoded */ }
     if (!t) return -1;
+    if (/^\d{6}$/.test(t)) t = t.slice(0, 2);
     if (/^\d{1,2}$/.test(t)) return stateIndex(w, t.padStart(2, "0"));
     const k = stateIndex(w, t.toUpperCase());
     if (k >= 0) return k;
     const name = t.toLowerCase().replace(/[_+]/g, " ");
-    return w.raw.states.findIndex((st, i) => (states?.[i]?.name || st.name || "").toLowerCase() === name);
+    return w.raw.states.findIndex((st, i) => [states?.[i]?.name, st.name, states?.[i]?.full, st.full]
+      .some((n) => n && String(n).toLowerCase() === name));
   }
   let stateHashRef = null; // {idx, raw}: the form of the #state value the current selection came from
   const url = createHashState({
@@ -660,16 +686,19 @@ async function main() {
     if (b) b.innerHTML = html;
     return b;
   };
-  setBtn("btn-share", `${icon("share", "🔗", { size: 15 })}<span class="lbl">Share</span>`);
+  setBtn("btn-share", `${icon("share", "🔗", { size: 15 })}<span class="lbl">分享</span>`);
   setBtn("btn-help", icon("help", "?", { size: 15 }));
-  setBtn("btn-pedia", `${icon("pedia", "📖", { size: 16 })}<span class="lbl">Almanac</span>`);
+  setBtn("btn-pedia", `${icon("pedia", "📖", { size: 16 })}<span class="lbl">百科</span>`);
   const searchIc = document.querySelector(".search-ic");
   if (searchIc) searchIc.innerHTML = icon("search", "🔍", { size: 14 });
-  document.querySelector(".search-kbd")?.setAttribute("title", "Press / or Ctrl K to search");
+  document.querySelector(".search-kbd")?.setAttribute("title", "按 / 或 Ctrl K 搜索");
 
   const search = initSearch({
     cities,
-    states: w.raw.states.map((s, i) => ({ name: states?.[i]?.name || s.name, abbr: s.abbr, population: states?.[i]?.population })),
+    states: w.raw.states.map((s, i) => ({
+      name: states?.[i]?.name || s.name, full: states?.[i]?.full || s.full, abbr: s.abbr, kind_label: states?.[i]?.kind_label || s.kind_label,
+      population: states?.[i]?.population,
+    })),
     onPick(r) {
       if (r.kind === "city") selectCity(r.city, { fly: true });
       else selectState(r.index, { fly: true });
@@ -778,15 +807,16 @@ async function main() {
     formatValue: (lens, t) => formatLensValue(lens, lensValueAt(lens, t)),
     selection: state.selectedCity ? { kind: "city", name: state.selectedCity.name }
       : state.selectedState != null ? { kind: "state", name: stateName(state.selectedState) } : null,
+    notice: world.notice?.text ? (NOTICE_TEXT.startsWith(String(world.notice.text).replace(/。$/, "")) ? NOTICE_TEXT : `${world.notice.text} ${NOTICE_TEXT}`) : NOTICE_TEXT,
   });
-  const slug = (s) => String(s).toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const slug = (s) => String(s).toLowerCase().normalize("NFC").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "");
   const share = initShare({
     button: document.getElementById("btn-share"),
     getInfo: shareInfo,
     beforeCopy: () => url.flush(),
     fileName: () => {
       const sel = shareInfo().selection;
-      return `united-states-${state.lens?.id || "terrain"}${sel ? "-" + slug(sel.name) : ""}.png`;
+      return `chinaciv-${state.lens?.id || "terrain"}${sel ? "-" + slug(sel.name) : ""}.png`;
     },
     onToast: toast,
   });
@@ -819,7 +849,7 @@ async function main() {
   const resBtn = document.getElementById("btn-res");
   if (resBtn) {
     resBtn.hidden = !w.resources;
-    resBtn.innerHTML = `${icon("resources", "⛏️", { size: 15 })}<span>Resources</span>`;
+    resBtn.innerHTML = `${icon("resources", "⛏️", { size: 15 })}<span>资源</span>`;
     const sync = () => {
       resBtn.classList.toggle("active", state.showResources);
       resBtn.setAttribute("aria-pressed", String(state.showResources));
@@ -838,7 +868,7 @@ async function main() {
       const on = !document.body.classList.contains("minimap-on");
       document.body.classList.toggle("minimap-on", on);
       mmBtn.setAttribute("aria-pressed", String(on));
-      mmBtn.setAttribute("aria-label", on ? "Hide the minimap" : "Show the minimap");
+      mmBtn.setAttribute("aria-label", on ? "隐藏小地图" : "显示小地图");
       minimap.draw();
     };
   }
@@ -1170,7 +1200,8 @@ async function main() {
     // data. Optional files arrive via loadData(name) (and the "data" event); see docs/DATA_CONTRACTS.md.
     data: { world, cities, states, nation, lenses: lensFile, resources, sources: sources || [], counties: null },
     loadData,
-    loadCounties: () => loadData("counties"),
+    // Phase 1 publishes no counties.json (county lenses are out of scope): resolve null without a request.
+    loadCounties: () => Promise.resolve(null),
     w, cam, state, cityById, lensById,
     // drawing
     requestDraw,
@@ -1253,6 +1284,10 @@ async function main() {
   });
   window.__app = app;
 
+  // Built-in China map furniture (docs/CN_PLAN.md §2.2): the 南海断续线 and island labels on the main map, and the
+  // 南海诸岛 inset. Registered here, not in an extension, so the map is never drawn without them.
+  for (const l of chinaMapLayers(w)) registerStaticLayer(l);
+
   // --- go --------------------------------------------------------------------------------------------------------
   renderTopbar(nation);
   resize();
@@ -1268,6 +1303,16 @@ async function main() {
   setTimeout(kickEager, 400);
   // Extensions load after the first frame is on its way; a missing extension folder is fine.
   installExtensions(app);
+  // Canvas text (banners, labels) is drawn with whatever font is there; once the Chinese web font arrives (if it
+  // does: offline it never loads and the system Song face stays), repaint with it.
+  try {
+    document.fonts?.ready?.then(() => {
+      if (![...document.fonts].some((f) => f.status === "loaded" && /Noto Serif SC/i.test(f.family))) return;
+      clearBannerCaches();
+      app.invalidate();
+    });
+    document.fonts?.addEventListener?.("loadingdone", () => { clearBannerCaches(); app.invalidate(); });
+  } catch { /* no Font Loading API */ }
 }
 
 main().catch((err) => {
@@ -1275,5 +1320,5 @@ main().catch((err) => {
   const el = document.getElementById("loading");
   if (!el) return;
   el.classList.add("error");
-  el.textContent = `Could not load the map data (${err.message}). Run "uv run python -m pipeline all" and serve web/ over HTTP.`;
+  el.textContent = `无法加载地图数据（${err.message}）。请运行 "uv run python -m pipeline all"，并通过 HTTP 提供 web/ 目录。`;
 });

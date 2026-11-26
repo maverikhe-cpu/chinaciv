@@ -39,6 +39,26 @@ export class Minimap {
       ctx.fillStyle = this.w.colors[i];
       ctx.fillRect((g.cx(i) - g.W / 2) * k, (g.cy(i) - g.H / 2) * k, cw, ch);
     }
+    // The 南海诸岛 inset (world.json inset.box) as a framed box, so the thumbnail matches the map.
+    const box = this.w.raw.inset?.box;
+    if (Array.isArray(box) && box.length === 4) {
+      const [x0, y0, x1, y1] = box.map((v) => v * k);
+      ctx.fillStyle = "#1d4468";
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      for (const l of this.w.raw.inset.land || []) {
+        const p = l?.pts;
+        if (!Array.isArray(p) || p.length < 6) continue;
+        ctx.beginPath();
+        ctx.moveTo(p[0] * k, p[1] * k);
+        for (let j = 2; j < p.length; j += 2) ctx.lineTo(p[j] * k, p[j + 1] * k);
+        ctx.closePath();
+        ctx.fillStyle = l.kind === "china" ? "#d8c69a" : "#7d838a";
+        ctx.fill();
+      }
+      ctx.strokeStyle = "#c9a45c";
+      ctx.lineWidth = this.dpr;
+      ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+    }
     this.sig = "";
     this.draw();
   }

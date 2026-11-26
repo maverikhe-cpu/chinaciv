@@ -31,7 +31,7 @@ from typing import Callable
 from .paths import RAW
 from .store import atomic_write_text
 
-USER_AGENT = "civ-usa-visualizer/0.1 (open data pipeline)"
+USER_AGENT = "chinaciv-visualizer/0.1 (open data pipeline)"
 OFFLINE = False  # set by the CLI's --offline flag
 RETRIES = 3  # total attempts per download
 BACKOFF = 2.0  # seconds before the 2nd attempt; doubles each time

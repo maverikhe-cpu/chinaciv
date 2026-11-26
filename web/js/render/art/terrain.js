@@ -34,8 +34,8 @@
 //   stamps on the edges shared with neighbours of the same relief so ranges run on across hexes. Wooded hills
 //   are earthy mounds strung along the local ridge direction (Appalachian Valley-and-Ridge) with single trees on
 //   their crests and flanks; desert ranges are grey-brown fault-block mountains, lined up north–south and broken
-//   by sage basins in the Great Basin; snow follows the highest sample (elev_max); mesas and buttes only appear on
-//   the Colorado Plateau between 1,400 and 2,400 m.
+//   by bare basins in the dry north-west (塔里木, 准噶尔, 柴达木, 河西); snow follows the highest sample (elev_max);
+//   mesas and buttes stand for the 黄土高原 tablelands between 800 and 2,300 m (world.json projection gives lon/lat).
 //   Sprites are never mirrored: the light always comes from the upper left, so variety comes from variants,
 //   jitter, scale and composition instead.
 //   LOD: far = texture, fields, mountains, hills and one clump per forest; mid = + marsh, suburbs, sparse scrub;
@@ -370,25 +370,25 @@ function speckle(g, S, r, n, dark, light) {
 
 // --- geography (lon/lat of a cell) ---------------------------------------------------------------------------------
 
-// Albers equal-area conic of the pipeline (pipeline/core/geo.py Albers + MapProjection); keep in sync.
+// Albers equal-area conic of the pipeline (pipeline/core/geo.py Albers + MapProjection); keep in sync. The
+// parameters come from world.json `projection` (lat1, lat2, lat0, lon0, min_x, max_y, margin); worlds without it
+// (synthetic gallery worlds) have no geography and the regional art falls back to elevation/cover rules.
 const RAD = Math.PI / 180;
-const ALBERS = (() => {
-  const RE = 6371.0088, p1 = 29.5 * RAD, p2 = 45.5 * RAD, p0 = 37.5 * RAD;
+const RE = 6371.0088;
+function albers(p) {
+  const p1 = (p.lat1 ?? 25) * RAD, p2 = (p.lat2 ?? 47) * RAD, p0 = (p.lat0 ?? 0) * RAD;
   const n = (Math.sin(p1) + Math.sin(p2)) / 2;
   const c = Math.cos(p1) ** 2 + 2 * n * Math.sin(p1);
-  return { RE, n, c, rho0: (RE * Math.sqrt(c - 2 * n * Math.sin(p0))) / n, lon0: -96 };
-})();
-// The shipped grid's projection (data/interim/_world.json), used when world.json does not carry `projection`.
-const SHIPPED_PROJ = { min_x: -2350.109311515341, max_y: 1559.2228881834299, margin: 200, grid: [25, 117, 90] };
+  return { n, c, rho0: (RE * Math.sqrt(c - 2 * n * Math.sin(p0))) / n, lon0: p.lon0 ?? 105 };
+}
 const geoTables = new WeakMap();
 
 function geoTable(w) {
   let t = geoTables.get(w);
   if (t === undefined) {
-    const raw = w.raw, g = w.grid, sp = SHIPPED_PROJ;
-    const p = raw.projection
-      || (raw.margin === sp.margin && g.R === sp.grid[0] && g.cols === sp.grid[1] && g.rows === sp.grid[2] ? sp : null);
-    t = p ? { p, lon: new Float32Array(g.size).fill(NaN), lat: new Float32Array(g.size) } : null;
+    const raw = w.raw, g = w.grid;
+    const p = raw.projection && Number.isFinite(raw.projection.min_x) && Number.isFinite(raw.projection.max_y) ? raw.projection : null;
+    t = p ? { p, a: albers(p), lon: new Float32Array(g.size).fill(NaN), lat: new Float32Array(g.size) } : null;
     geoTables.set(w, t);
   }
   return t;
@@ -398,8 +398,9 @@ function geoTable(w) {
 function geo(w, i) {
   const t = geoTable(w);
   if (t && Number.isNaN(t.lon[i])) {
-    const { RE, n, c, rho0, lon0 } = ALBERS;
-    const X = w.grid.cx(i) + t.p.min_x - t.p.margin, Y = t.p.max_y + t.p.margin - w.grid.cy(i);
+    const { n, c, rho0, lon0 } = t.a;
+    const margin = t.p.margin ?? 200;
+    const X = w.grid.cx(i) + t.p.min_x - margin, Y = t.p.max_y + margin - w.grid.cy(i);
     const dy = rho0 - Y, rho = Math.hypot(X, dy);
     const s = (c - ((rho * n) / RE) ** 2) / (2 * n);
     t.lon[i] = lon0 + Math.atan2(X, dy) / n / RAD;
@@ -407,29 +408,38 @@ function geo(w, i) {
   }
   return t;
 }
+const lonLat = (w, i) => {
+  const t = geo(w, i);
+  return t ? [t.lon[i], t.lat[i]] : null;
+};
+const inBox = (ll, lon0, lat0, lon1, lat1) => ll && ll[0] >= lon0 && ll[0] <= lon1 && ll[1] >= lat0 && ll[1] <= lat1;
 
-/** Colorado Plateau (canyon country): the only place mesas and buttes are drawn. */
+/** 黄土高原 (the Loess Plateau, 陕北 · 陇东 · 晋西 · 宁南): tablelands cut by gullies, drawn as mesas and buttes. */
 function onPlateau(w, i) {
   const e = w.raw.elev[i];
-  if (e < 1400 || e > 2400) return false; // tablelands, not the high ranges or the low desert
-  const t = geo(w, i);
-  if (!t) return hash01(i, 97) < 0.5; // synthetic worlds (the dev gallery): some high desert
-  const lon = t.lon[i], lat = t.lat[i];
-  return lat > 35.8 && lat < 38.6 && lon > -112.6 && lon < -107.8;
+  if (e < 800 || e > 2300) return false; // the tablelands, not the Liupan / Lüliang crests or the valleys
+  const ll = lonLat(w, i);
+  if (!ll) return hash01(i, 97) < 0.5; // synthetic worlds (the dev gallery): some high desert
+  return inBox(ll, 103.5, 34.2, 114, 39.6);
 }
 
-/** The Great Basin (Nevada, western Utah, eastern Oregon and California): basin-and-range country. */
+/** Basin-and-range country of the dry north-west: 塔里木 / 准噶尔 / 吐鲁番-哈密 / 柴达木 basins, 河西走廊 and 阿拉善:
+ *  bare ranges between gravel plains and playas. */
 function inGreatBasin(w, i) {
-  const t = geo(w, i);
-  if (!t) return false;
-  const lon = t.lon[i], lat = t.lat[i];
-  return lat > 36.2 && lat < 43.6 && lon > -120.3 && lon < -111.8;
+  const ll = lonLat(w, i);
+  if (!ll) return false;
+  return inBox(ll, 74, 36.2, 90.5, 42.3) // 塔里木盆地 and its rim
+    || inBox(ll, 79.5, 43.8, 91, 47.5) // 准噶尔盆地
+    || inBox(ll, 87, 41, 96, 44) // 吐鲁番 · 哈密
+    || inBox(ll, 90, 35.6, 98.5, 39.2) // 柴达木盆地
+    || inBox(ll, 96, 37.6, 107, 42.8); // 河西走廊 · 阿拉善
 }
 
-/** Centre-pivot irrigation belongs to the dry High Plains and the West (west of ~98°W). */
+/** Centre-pivot irrigation belongs to the dry farmland of the north-west and Inner Mongolia (新疆、河套、科尔沁). */
 function pivotCountry(w, i) {
-  const t = geo(w, i);
-  return !t || t.lon[i] < -98;
+  const ll = lonLat(w, i);
+  if (!ll) return true;
+  return (ll[0] < 112 && ll[1] > 36) || (ll[1] > 42 && ll[0] < 124);
 }
 
 // --- 2. cropland patchwork ----------------------------------------------------------------------------------------
@@ -448,14 +458,14 @@ function isFieldCell(w, i, Rpx) {
 /** Field orientation region of a cell: {key, ang (rad), ox, oy (km pattern offset)}. */
 function fieldRegion(w, i) {
   const t = geo(w, i);
-  if (t && t.lon[i] < -82.5) {
-    // Township-and-range country: fields squared to the meridians. Rotating north by the Albers convergence
-    // n·(lon − lon0) per 3° band keeps them aligned with the real section lines.
-    const band = Math.floor((t.lon[i] + 130) / 3);
-    const lonMid = band * 3 - 130 + 1.5;
-    return { key: `p${band}`, ang: -ALBERS.n * (lonMid - ALBERS.lon0) * RAD, ox: band * 37.3, oy: band * 23.9 };
+  if (t && (t.lat[i] > 43 || (t.lat[i] > 33 && t.lon[i] > 112 && t.lon[i] < 122 && w.raw.elev[i] < 200))) {
+    // The big state farms of 东北 (北大荒) and the 华北平原: fields squared to the meridians. Rotating north by the
+    // Albers convergence n·(lon − lon0) per 3° band keeps them aligned with north.
+    const band = Math.floor((t.lon[i] - 60) / 3);
+    const lonMid = band * 3 + 60 + 1.5;
+    return { key: `p${band}`, ang: -t.a.n * (lonMid - t.a.lon0) * RAD, ox: band * 37.3, oy: band * 23.9 };
   }
-  // Metes-and-bounds country (or no projection): an irregular direction per ~280 km region.
+  // Small irregular fields (the south, the hills, or no projection): an irregular direction per ~280 km region.
   const bx = Math.floor(w.grid.cx(i) / 280), by = Math.floor(w.grid.cy(i) / 280);
   const id = bx * 7919 + by * 104729;
   const ang = [-0.42, -0.2, 0.12, 0.3, 0.52, -0.08][Math.floor(hash01(id, 5) * 6)];

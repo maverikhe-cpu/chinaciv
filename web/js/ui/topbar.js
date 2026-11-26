@@ -7,9 +7,9 @@ export function renderTopbar(nation) {
   const items = statDefs(nation).map((d) => {
     const ic = d.yield ? glyph(d.yield, 17) : icon(d.iconId, d.emoji, { size: 17 });
     const value = fmtStat(d, d.value);
-    const tip = `${d.name}: ${d.description} Click for the report.`;
+    const tip = `${d.name}：${d.description} 点击查看报告。`;
     return `<button type="button" class="yield" data-report="${esc(d.key)}" aria-expanded="false" aria-haspopup="dialog" aria-controls="yield-report"
-      title="${esc(tip)}" aria-label="${esc(d.name)}: ${esc(value)}. Open the report">
+      title="${esc(tip)}" aria-label="${esc(d.name)}：${esc(value)}。打开报告">
       <span class="ico" style="color:${esc(d.color)}">${ic}</span><span style="color:${esc(d.color)}">${esc(value)}</span><span class="caret" aria-hidden="true"></span></button>`;
   });
   const el = document.getElementById("yields");
@@ -20,7 +20,7 @@ export function renderTopbar(nation) {
   if (typeof ResizeObserver === "function") new ResizeObserver(check).observe(el);
   check();
   watchBarOverflow(document.getElementById("topbar"));
-  document.getElementById("turn").innerHTML = `Turn <b>${esc(nation.year ?? "")}</b> · ${esc(nation.vintage || "")}`;
+  document.getElementById("turn").innerHTML = `回合 <b>${esc(nation.year ?? "")}</b> · ${esc(nation.vintage || "")}`;
 }
 
 // Phones scroll the whole bar sideways. Mark which ends have more to show (.more-l / .more-r) so CSS can fade

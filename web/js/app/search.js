@@ -1,12 +1,13 @@
-// Top-bar search over cities and states: prefix matches first, then word-prefix, then substring; ties by population.
+// Top-bar search over cities and provinces: prefix matches first, then word-prefix, then substring; ties by population.
+// Works on Chinese names (深圳, 深圳市, 广东, 广东省, 粤) as well as Latin text.
 import { esc, popShort } from "../format.js";
 import { icon } from "../ui/icon.js";
 
-const norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").normalize("NFC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 const MAX = 8;
 
 /**
- * opts: {cities, states (list of {name, abbr, population?}), onPick({kind:'city'|'state', city?, index?})}
+ * opts: {cities, states (list of {name, full?, abbr, kind_label?, population?}), onPick({kind:'city'|'state', city?, index?})}
  */
 export function initSearch(opts) {
   const input = document.getElementById("search-input");
@@ -14,19 +15,19 @@ export function initSearch(opts) {
   if (!input || !box) return { focus() {}, close() {}, get isOpen() { return false; } };
   // The full placeholder only fits the wide search box; narrower ones say just "Search".
   const narrow = matchMedia("(max-width: 1120px)");
-  const setPlaceholder = () => (input.placeholder = narrow.matches ? "Search" : "Search cities & states");
+  const setPlaceholder = () => (input.placeholder = narrow.matches ? "搜索" : "搜索城市、省份");
   setPlaceholder();
   narrow.addEventListener?.("change", setPlaceholder);
 
   const entries = [];
   for (const c of opts.cities || []) {
-    entries.push({ kind: "city", city: c, name: c.name, n: norm(c.name), full: norm(c.full), pop: c.population || 0,
-      sub: c.full || "", label: c.name });
+    entries.push({ kind: "city", city: c, name: c.name, n: norm(c.name), full: norm(c.full), pop: c.sizePop ?? c.population ?? 0,
+      sub: [c.full && c.full !== c.name ? c.full : "", c.kind_label || ""].filter(Boolean).join(" · "), label: c.name });
   }
   (opts.states || []).forEach((s, index) => {
     if (!s) return;
-    entries.push({ kind: "state", index, name: s.name, n: norm(s.name), full: norm(s.abbr), abbr: (s.abbr || "").toLowerCase(),
-      pop: s.population || 0, sub: "State", label: s.name });
+    entries.push({ kind: "state", index, name: s.name, n: norm(s.name), full: norm(`${s.full || ""} ${s.abbr || ""}`), abbr: (s.abbr || "").toLowerCase(),
+      pop: s.population || 0, sub: [s.full && s.full !== s.name ? s.full : "", s.kind_label || "省级行政区"].filter(Boolean).join(" · "), label: s.name });
   });
 
   let results = [];
@@ -64,7 +65,7 @@ export function initSearch(opts) {
 
   function render() {
     if (!results.length) {
-      box.innerHTML = input.value.trim() ? `<div class="sr-empty">No city or state matches “${esc(input.value.trim())}”</div>` : "";
+      box.innerHTML = input.value.trim() ? `<div class="sr-empty">没有与“${esc(input.value.trim())}”匹配的城市或省份</div>` : "";
       box.hidden = !input.value.trim();
       input.setAttribute("aria-expanded", String(!box.hidden));
       input.removeAttribute("aria-activedescendant");

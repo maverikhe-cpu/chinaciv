@@ -8,7 +8,7 @@ let uid = 0;
  * series = [{year, value}], fmt(value) → text. Width scales with the container (viewBox).
  */
 export function sparkline(series, { fmt, color = "#ecd08e", height = 92, title = "" } = {}) {
-  if (series.length < 2) return `<p class="muted cv-note">No yearly estimates for this metro.</p>`;
+  if (series.length < 2) return `<p class="muted cv-note">该市没有历年数据。</p>`;
   const W = 400, H = height, padL = 6, padR = 6, padT = 22, padB = 20;
   const vals = series.map((p) => p.value);
   let lo = Math.min(...vals), hi = Math.max(...vals);

@@ -11,7 +11,7 @@
 // (borders, resources, state names, fog, selection). web/dev/art.html shows every art piece side by side.
 import { css, smoothstep } from "../color.js";
 import { OCEAN_DEEP_CSS } from "../terrain.js";
-import { LABEL_FONT, LABEL_SPACING, stateIndex, stateOutline } from "../world.js";
+import { LABEL_FONT, LABEL_SPACING, charEm, stateIndex, stateOutline } from "../world.js";
 import { drawIcon, hasIcon } from "../icons.js";
 import { drawTerrainGlyphs, GLYPHS_MIN_RPX } from "./art/terrain.js";
 import { drawCityTile, cityTileVisible, cityIsDot, metroSpill } from "./art/city.js";
@@ -337,7 +337,43 @@ function drawBorders(ctx, w, s, Rpx, lens) {
   // bring the hex staircase back, so it is only drawn when hexes are too small for the shore pass's lobes.
   if (Rpx < 4) strokeSegs(ctx, w.coastLines, "rgba(240,226,180,.5)", 1.1 / s);
   strokeSegs(ctx, w.stateLines, "rgba(15,10,5,.55)", Math.max(0.8, Math.min(2, Rpx * 0.08)) / s);
-  strokeSegs(ctx, w.nationLines, "rgba(255,232,160,.85)", Math.max(1.2, Math.min(3, Rpx * 0.12)) / s);
+  drawNationalBoundary(ctx, w, s, Rpx);
+}
+
+// Standard-map legend symbols (screen px): 国界 = long dash · dot, 未定国界 = long dashes only; both over a pale halo.
+export const BOUNDARY_STYLE = {
+  defined: { dash: [11, 3, 2.5, 3], color: "rgba(122,24,74,.95)", width: 1, label: "国界" },
+  undefined: { dash: [5, 5], color: "rgba(122,24,74,.9)", width: 0.7, label: "未定国界" },
+};
+
+function strokePaths(ctx, paths) {
+  ctx.beginPath();
+  for (const p of paths) {
+    ctx.moveTo(p[0], p[1]);
+    for (let k = 2; k < p.length; k += 2) ctx.lineTo(p[k], p[k + 1]);
+  }
+  ctx.stroke();
+}
+
+/** 国界 and 未定国界 (world.js nationPaths / undefinedPaths) in their legend symbols; `s` = world→screen scale. */
+export function drawNationalBoundary(ctx, w, s, Rpx) {
+  const lw = Math.max(1.3, Math.min(2.6, Rpx * 0.1));
+  ctx.save();
+  ctx.lineJoin = "round";
+  ctx.lineCap = "butt";
+  // halo: separates the symbol from the province colour band and the terrain
+  ctx.strokeStyle = "rgba(255,232,160,.55)";
+  ctx.lineWidth = (lw + 3) / s;
+  strokePaths(ctx, w.nationPaths || []);
+  strokePaths(ctx, w.undefinedPaths || []);
+  for (const [paths, st] of [[w.nationPaths, BOUNDARY_STYLE.defined], [w.undefinedPaths, BOUNDARY_STYLE.undefined]]) {
+    if (!paths?.length) continue;
+    ctx.strokeStyle = st.color;
+    ctx.lineWidth = (lw * st.width) / s;
+    ctx.setLineDash(st.dash.map((d) => (d * Math.max(1, lw / 1.6)) / s));
+    strokePaths(ctx, paths);
+  }
+  ctx.restore();
 }
 
 
@@ -572,6 +608,23 @@ function stateCells(w) {
   return w._stateCells;
 }
 
+// Oriented rectangle: centre, half-extents along the text direction (hu) and across it (hv), unit axes.
+function orientedBox(cx, cy, hu, hv, angle) {
+  const ux = Math.cos(angle), uy = Math.sin(angle);
+  return { cx, cy, hu, hv, ux, uy };
+}
+
+// Separating-axis test for two oriented rectangles.
+function boxesOverlap(a, b) {
+  const dx = b.cx - a.cx, dy = b.cy - a.cy;
+  for (const [ax, ay] of [[a.ux, a.uy], [-a.uy, a.ux], [b.ux, b.uy], [-b.uy, b.ux]]) {
+    const ra = a.hu * Math.abs(a.ux * ax + a.uy * ay) + a.hv * Math.abs(-a.uy * ax + a.ux * ay);
+    const rb = b.hu * Math.abs(b.ux * ax + b.uy * ay) + b.hv * Math.abs(-b.uy * ax + b.ux * ay);
+    if (Math.abs(dx * ax + dy * ay) > ra + rb) return false;
+  }
+  return true;
+}
+
 function drawStateLabels(ctx, vp, w, Rpx) {
   const { s } = vp;
   const spaced = "letterSpacing" in ctx;
@@ -586,9 +639,10 @@ function drawStateLabels(ctx, vp, w, Rpx) {
     let a = stateLabelAlpha(lbl, Rpx, s);
     if (a < 0.02) continue;
     let px = Math.min(lbl.size * s, 110);
-    const abbr = lbl.text.length <= 3;
+    // Short forms: the label says so (world.js); older labels without the flag are short when ≤ 3 Latin letters.
+    const abbr = lbl.abbr ?? (lbl.text.length <= 3 && !/[\u3400-\u9fff]/.test(lbl.text));
     if (abbr) {
-      // Small states (DE, RI, CT, NJ, MD, DC...): a modest postal code that must fit the state on screen.
+      // Small provinces / states (沪, 津, DE, RI...): a modest short form that must fit the area on screen.
       const extent = Math.sqrt(cells[lbl.state] || 1) * Rpx * 1.6;
       px = Math.min(px, 15, extent * 0.42);
       if (px < 9) continue;
@@ -596,12 +650,19 @@ function drawStateLabels(ctx, vp, w, Rpx) {
     }
     const sx = (lbl.x - vp.x0) * s, sy = (lbl.y - vp.y0) * s;
     if (sx < -600 || sy < -200 || sx > vp.cssW + 600 || sy > vp.cssH + 200) continue;
-    // Axis-aligned box of the rotated text (approximate width from the em estimate).
-    const tw = px * (lbl.text.length * 0.78 + LABEL_SPACING * (lbl.text.length - 1)), th = px * 0.8;
-    const c = Math.abs(Math.cos(lbl.angle)), sn = Math.abs(Math.sin(lbl.angle));
-    const bw = (tw * c + th * sn) / 2, bh = (tw * sn + th * c) / 2;
-    const box = [sx - bw, sy - bh, sx + bw, sy + bh];
-    if (placed.some((p) => box[0] < p[2] && p[0] < box[2] && box[1] < p[3] && p[1] < box[3])) continue;
+    // The rotated text as an oriented box (approximate width from the em estimate). A label that collides with
+    // one already placed is shrunk step by step (down to a readable minimum) before it is dropped, so a big
+    // neighbour's name cannot hide a whole province.
+    const chars = [...lbl.text];
+    const em = chars.reduce((q, ch) => q + charEm(ch), 0) + LABEL_SPACING * (chars.length - 1);
+    let box = null;
+    for (const f of [1, 0.85, 0.72, 0.6, 0.5]) {
+      const p2 = px * f;
+      if (f < 1 && p2 < (abbr ? 9 : 11)) break;
+      const cand = orientedBox(sx, sy, (p2 * em) / 2 + 2, p2 * 0.42 + 1, lbl.angle);
+      if (!placed.some((q) => boxesOverlap(cand, q))) { box = cand; px = p2; break; }
+    }
+    if (!box) continue;
     placed.push(box);
     ctx.save();
     ctx.translate(sx, sy);

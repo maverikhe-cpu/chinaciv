@@ -1,327 +1,164 @@
-"""The game-concept → real-data mapping, in one place.
+"""The game-concept → real-data mapping for the five yields, in one place (docs/CN_PLAN.md §5.3).
 
-Each yield is defined once here and exported to the browser, so the UI and the
-Almanac always describe exactly what was computed. Gold is GDP (BEA); the
-other yields count workers by industry where they live (ACS C24030).
+Helper module (no build()): used by cities.py (cities.json, nation.json) and states.py (states.json). The YIELDS list
+is published in nation.json, so the UI and the Almanac describe exactly what was computed.
+
+* Gold 💰 = 地区生产总值 (GDP, 元, current prices) of the stats year (cn_stats_city).
+* Food 🌾 / Production ⚙️ / Science 🔬 / Culture 🎭 each use **one basis for every city**, the first in this priority
+  order that has data for ≥ BASIS_SHARE (75%; the plan said 90%) of the banner cities; otherwise the yield is null everywhere (never a
+  mix of bases, never 0 for unknown) and its description says why:
+
+  | Yield      | Priority 1: employment (persons, cn_city_industry)          | Priority 2: value (元)                       |
+  |------------|-------------------------------------------------------------|----------------------------------------------|
+  | Food       | A 农、林、牧、渔业                                          | 第一产业增加值 (cn_stats_city va_primary)     |
+  | Production | B 采矿业 + C 制造业 + D 电力热力燃气水 + E 建筑业           | 第二产业增加值 (cn_stats_city va_secondary)   |
+  | Science    | I 信息传输软件和信息技术服务业 + M 科学研究和技术服务业     | R&D 经费内部支出 (cn_city_industry rd_expenditure) |
+  | Culture    | R 文化、体育和娱乐业                                        | –                                            |
+
+  An employment sum needs every listed section known for that city (else null for that city).
 """
 
 from __future__ import annotations
 
-import re
+BASIS_SHARE = 0.75  # CN_PLAN §5.3 said 90%; lowered to 75% at integration so the three-sector value added
+# (267/344 cities, 78%) can drive Food/Production. Cities without it stay null; bases are still never mixed.
+YIELD_KEYS = ["food", "production", "gold", "science", "culture"]
 
-# C24030 (Sex by Industry): line numbers in the "Male" block; the "Female"
-# block repeats them 27 lines later.
-INDUSTRY_LINES = {
-    "agriculture": (4, "Agriculture, forestry, fishing & hunting"),
-    "mining": (5, "Mining, quarrying, oil & gas"),
-    "construction": (6, "Construction"),
-    "manufacturing": (7, "Manufacturing"),
-    "wholesale": (8, "Wholesale trade"),
-    "retail": (9, "Retail trade"),
-    "transportation": (11, "Transportation & warehousing"),
-    "utilities": (12, "Utilities"),
-    "information": (13, "Information"),
-    "finance": (15, "Finance & insurance"),
-    "real_estate": (16, "Real estate"),
-    "professional": (18, "Professional, scientific & technical"),
-    "management": (19, "Management of companies"),
-    "admin": (20, "Administrative & waste services"),
-    "education": (22, "Educational services"),
-    "health": (23, "Health care & social assistance"),
-    "arts": (25, "Arts, entertainment & recreation"),
-    "accommodation": (26, "Accommodation & food services"),
-    "other": (27, "Other services"),
-    "public_admin": (28, "Public administration"),
+# Per yield, in priority order: (unit, industry sections | field name).
+BASES: dict[str, list[tuple[str, object]]] = {
+    "food": [("persons", ["A"]), ("cny", "va_primary")],
+    "production": [("persons", ["B", "C", "D", "E"]), ("cny", "va_secondary")],
+    "gold": [("cny", "gdp")],
+    "science": [("persons", ["I", "M"]), ("cny", "rd_expenditure")],
+    "culture": [("persons", ["R"])],
 }
-FEMALE_OFFSET = 27
+CNY_FIELD = {"food": "va_primary", "production": "va_secondary", "gold": "gdp", "science": "rd_expenditure"}
 
-# BEA CAGDP2 line codes for the same industries (NAICS sectors). ACS "public
-# administration" has no GDP twin: BEA's "government" line also covers public
-# schools, hospitals and utilities run by governments, so it gets its own key.
-GDP_LINES = {
-    "agriculture": "3",
-    "mining": "6",
-    "construction": "11",
-    "manufacturing": "12",
-    "wholesale": "34",
-    "retail": "35",
-    "transportation": "36",
-    "utilities": "10",
-    "information": "45",
-    "finance": "51",
-    "real_estate": "56",
-    "professional": "60",
-    "management": "64",
-    "admin": "65",
-    "education": "69",
-    "health": "70",
-    "arts": "76",
-    "accommodation": "79",
-    "other": "82",
-    "government": "83",
-}
-GDP_INDUSTRIES = {k: INDUSTRY_LINES[k][1] for k in GDP_LINES if k in INDUSTRY_LINES} | {
-    "government": "Government & government enterprises (federal, state & local, incl. public schools & hospitals)"
+# Display metadata (labels are Chinese, the frontend shows them as is).
+META = {
+    "food": {"icon": "y-food", "emoji": "🌾", "label": "粮食", "color": "#7fbf3f"},
+    "production": {"icon": "y-production", "emoji": "⚙️", "label": "生产力", "color": "#d9823b"},
+    "gold": {"icon": "y-gold", "emoji": "💰", "label": "金币", "color": "#f2c94c"},
+    "science": {"icon": "y-science", "emoji": "🔬", "label": "科研", "color": "#4fa3e0"},
+    "culture": {"icon": "y-culture", "emoji": "🎭", "label": "文化", "color": "#b07ce0"},
 }
 
-YIELDS = [
-    {
-        "key": "food",
-        "icon": "y-food",
-        "emoji": "🌾",
-        "label": "Food",
-        "color": "#7fbf3f",
-        "unit": "workers",
-        "industries": ["agriculture"],
-        "description": "Workers in agriculture, forestry, fishing & hunting, counted where they live (ACS C24030).",
-    },
-    {
-        "key": "production",
-        "icon": "y-production",
-        "emoji": "⚙️",
-        "label": "Production",
-        "color": "#d9823b",
-        "unit": "workers",
-        "industries": ["manufacturing", "construction", "mining"],
-        "description": "Workers in manufacturing, construction and mining, counted where they live (ACS C24030).",
-    },
-    {
-        "key": "gold",
-        "icon": "y-gold",
-        "emoji": "💰",
-        "label": "Gold",
-        "color": "#f2c94c",
-        "unit": "usd",
-        "industries": [],
-        "description": "Gross domestic product per year in current dollars, counted where the work is done (BEA "
-        "CAGDP2, all industries). Metro GDP is the sum of the metro's counties (OMB 2023 delineations); for "
-        "Virginia's combined county + independent city areas BEA reports one figure, split here by population "
-        "only where the parts fall in different metros.",
-    },
-    {
-        "key": "science",
-        "icon": "y-science",
-        "emoji": "🔬",
-        "label": "Science",
-        "color": "#4fa3e0",
-        "unit": "workers",
-        "industries": ["professional", "information"],
-        "description": "Workers in professional, scientific & technical services and the information sector, counted "
-        "where they live (ACS C24030).",
-    },
-    {
-        "key": "culture",
-        "icon": "y-culture",
-        "emoji": "🎭",
-        "label": "Culture",
-        "color": "#b07ce0",
-        "unit": "workers",
-        "industries": ["arts"],
-        "description": "Workers in arts, entertainment & recreation, counted where they live (ACS C24030).",
-    },
-]
+# What each basis is, in words (Chinese, for the yield description).
+BASIS_TEXT = {
+    ("food", "persons"): "农、林、牧、渔业（A 门类）城镇非私营单位就业人员",
+    ("food", "cny"): "第一产业增加值（元，当年价）",
+    ("production", "persons"): "采矿业、制造业、电力热力燃气及水生产和供应业、建筑业（B–E 门类）城镇非私营单位就业人员",
+    ("production", "cny"): "第二产业增加值（元，当年价）",
+    ("gold", "cny"): "地区生产总值（元，当年价）",
+    ("science", "persons"): "信息传输、软件和信息技术服务业与科学研究和技术服务业（I、M 门类）城镇非私营单位就业人员",
+    ("science", "cny"): "研究与试验发展（R&D）经费内部支出（元）",
+    ("culture", "persons"): "文化、体育和娱乐业（R 门类）城镇非私营单位就业人员",
+}
 
 
-def industries(rec: dict) -> dict[str, int | None]:
-    """Workers per industry; None when the table is missing for this geography."""
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def basis_name(basis) -> str | None:
+    """A short machine name of a basis: 'employment:A', 'employment:B+C+D+E', 'va_primary', 'gdp', … or None."""
+    if basis is None:
+        return None
+    unit, what = basis
+    return "employment:" + "+".join(what) if unit == "persons" else str(what)
+
+
+def basis_value(basis, stats: dict | None, ind: dict | None):
+    """The value of one yield basis for a record pair (stats = cn_stats_city record, ind = cn_city_industry record);
+    None when unknown. Employment sums need every section known."""
+    if basis is None:
+        return None
+    unit, what = basis
+    if unit == "persons":
+        emp = (ind or {}).get("emp") or {}
+        vals = [emp.get(k) for k in what]
+        return sum(vals) if vals and all(_is_num(v) for v in vals) else None
+    src = ind if what == "rd_expenditure" else stats
+    v = (src or {}).get(what)
+    return v if _is_num(v) else None
+
+
+def coverage(stats: dict, ind: dict, banner_ids: list[str]) -> dict[str, list[tuple[tuple, int]]]:
+    """yield key → [(basis, number of banner cities with a value)] for every basis in priority order."""
     out = {}
-    for key, (line, _) in INDUSTRY_LINES.items():
-        m = rec.get(f"C24030_{line:03d}")
-        f = rec.get(f"C24030_{line + FEMALE_OFFSET:03d}")
-        out[key] = None if m is None and f is None else int((m or 0) + (f or 0))
+    for key, options in BASES.items():
+        out[key] = [(b, sum(1 for cid in banner_ids
+                            if basis_value(b, stats["cities"].get(cid), ind["cities"].get(cid)) is not None))
+                    for b in options]
     return out
 
 
-def economy(rec: dict, gdp: dict | None = None) -> dict:
-    """Yields + economic profile for one ACS geography record, plus optional GDP.
-
-    `gdp` is {"total": usd|None, "year": int, "by_industry": {key: usd|None}}.
-    """
-    jobs = industries(rec)
-    gdp = gdp or {}
-    yields = {}
-    for y in YIELDS:
-        if y["key"] == "gold":
-            yields["gold"] = gdp.get("total")
-        else:
-            vals = [jobs[k] for k in y["industries"]]
-            yields[y["key"]] = None if any(v is None for v in vals) else sum(vals)
-    labor = rec.get("B23025_003")
-    unemployed = rec.get("B23025_005")
-    income = rec.get("B19013_001")
-    rent = rec.get("B25064_001")
-    return {
-        "population": rec.get("B01003_001"),
-        "yields": yields,
-        "jobs": jobs,
-        "employed": rec.get("C24030_001"),
-        "median_income": income,
-        "median_rent": rent,
-        "home_value": rec.get("B25077_001"),
-        "unemployment": round(unemployed / labor, 4) if labor and unemployed is not None else None,
-        "rent_burden": round(rent * 12 / income, 4) if rent and income else None,
-        "gdp": gdp.get("total"),
-        "gdp_year": gdp.get("year"),
-        "gdp_by_industry": gdp.get("by_industry"),
-        "gdp_undisclosed": gdp.get("undisclosed"),
-        "gdp_estimated": gdp.get("estimated"),
-    }
-
-
-# CAGDP2 lines that are the sum of other lines. BEA withholds (D) a county's line to protect one business, but the
-# parent and the siblings are often published, so the withheld value follows by subtraction.
-GDP_IDENTITIES = [
-    ("1", ["2", "83"]),
-    ("2", ["91", "92"]),
-    ("91", ["87", "11", "12"]),
-    ("92", ["10", "88", "36", "45", "50", "59", "68", "75", "82"]),
-    ("87", ["3", "6"]),
-    ("88", ["34", "35"]),
-    ("89", ["36", "10"]),
-    ("90", ["12", "45"]),
-    ("12", ["13", "25"]),
-    ("50", ["51", "56"]),
-    ("59", ["60", "64", "65"]),
-    ("68", ["69", "70"]),
-    ("75", ["76", "79"]),
-]
-
-
-# Apportioning order: the finest groups first, so a sector's remainder is split among as few lines as possible.
-APPORTION_ORDER = ["87", "88", "89", "90", "12", "50", "59", "68", "75", "91", "92", "2", "1"]
-
-
-def _exact(out: dict) -> bool:
-    changed = False
-    for parent, kids in GDP_IDENTITIES:
-        terms = [parent, *kids]
-        if any(t not in out for t in terms):
-            continue
-        unknown = [t for t in terms if out[t] is None]
-        if len(unknown) != 1:
-            continue
-        u = unknown[0]
-        known = sum(out[k] for k in kids if k != u)
-        out[u] = round(out[parent] - known) if u != parent else round(known)
-        changed = True
-    return changed
-
-
-def fill_suppressed(lines: dict, ref: dict | None = None, estimated: set | None = None) -> dict:
-    """{line: usd|None} with withheld lines recovered.
-
-    First exactly: an identity (parent = sum of its lines) with one unknown term gives it by subtraction. BEA
-    suppresses complementary cells, so a county often has two or more unknown lines under a known parent; with
-    `ref` (a fully disclosed row set, e.g. the nation) that remainder is then split among them in proportion to
-    `ref`, and those lines are added to `estimated`.
-    """
-    out = dict(lines)
-    while _exact(out):
-        pass
-    if ref is None:
-        return out
-    idents = dict(GDP_IDENTITIES)
-    progress = True
-    while progress:
-        progress = False
-        for parent in APPORTION_ORDER:
-            kids = idents[parent]
-            if out.get(parent) is None or any(k not in out for k in kids):
-                continue
-            unknown = [k for k in kids if out[k] is None]
-            if len(unknown) < 2:
-                continue
-            rest = max(0.0, out[parent] - sum(out[k] for k in kids if out[k] is not None))
-            weights = [max(0.0, ref.get(k) or 0.0) for k in unknown]
-            tw = sum(weights)
-            for k, wgt in zip(unknown, weights):
-                out[k] = round(rest * (wgt / tw if tw > 0 else 1 / len(unknown)))
-                if estimated is not None:
-                    estimated.add(k)
-            while _exact(out):
-                pass
-            progress = True
-    return out
-
-
-def gdp_profile(lines: dict | None, year: int, estimated: set | None = None) -> dict:
-    """A BEA row set {line: usd|None} → the `gdp` argument of economy(). Withheld lines are recovered from their
-    parent and sibling lines where possible; what stays withheld is reported as `undisclosed` (the total minus the
-    disclosed industries), so shares can be taken of the real total."""
-    if not lines:
-        return {"total": None, "year": year, "by_industry": None, "undisclosed": None, "estimated": None}
-    lines = fill_suppressed(lines)
-    by = {k: lines.get(line) for k, line in GDP_LINES.items()}
-    est = sorted(k for k, line in GDP_LINES.items() if estimated and line in estimated and by.get(k) is not None)
-    total = lines.get("1")
-    undisclosed = None
-    if total is not None and any(v is None for v in by.values()):
-        undisclosed = max(0, round(total - sum(v for v in by.values() if v is not None)))
-    return {"total": total, "year": year, "by_industry": by, "undisclosed": undisclosed, "estimated": est or None}
-
-
-def bea_combos(bea: dict, gaz_counties: dict) -> dict[str, list[str]]:
-    """BEA combination areas → component county FIPS, by matching names to the Gazetteer.
-
-    Virginia: 'Fairfax, Fairfax City + Falls Church, VA*' = Fairfax County + Fairfax city + Falls Church city.
-    Hawaii: 'Maui + Kalawao, HI*' = Maui County + Kalawao County.
-    """
-    by_name = {(g["usps"], g["name"].lower()): geoid for geoid, g in gaz_counties.items()}
+def choose_bases(stats: dict, ind: dict, banner_ids: list[str]) -> dict[str, tuple | None]:
+    """CN_PLAN §5.3: per yield, the first basis with data for ≥ BASIS_SHARE of banner cities, else None.
+    Gold is GDP by definition (cities without GDP are null)."""
+    cov = coverage(stats, ind, banner_ids)
+    n = len(banner_ids)
     out = {}
-    for fips, name in bea["county_names"].items():
-        if " + " not in name:
-            continue
-        body, _, st = name.rpartition(", ")
-        st = st.rstrip("*")
-        parts = re.split(r", | \+ ", body)
-        names = [f"{parts[0]} County"] + [
-            re.sub(r" City$", "", p) + (" city" if st == "VA" else " County") for p in parts[1:]
-        ]
-        comps = [by_name.get((st, n.lower())) for n in names]
-        if None in comps:
-            raise RuntimeError(f"cannot resolve BEA area {fips} {name!r} → {names}")
-        out[fips] = comps
-    return out
-
-
-def sum_counties(fips_list: list[str], bea: dict, combos: dict, pop: dict, estimated: set | None = None) -> tuple[dict, bool]:
-    """Add up BEA lines over counties. Returns ({line: usd|None}, split_used). Lines that needed an apportioned
-    county value are added to `estimated`.
-
-    Withheld county lines are first recovered from their parent and sibling lines (fill_suppressed: exactly where
-    possible, else the parent's remainder split in the nation's proportions); a line is None if any county's value
-    is still unknown. A combination area counts in full
-    when all its parts are in the list, otherwise by the parts' share of population.
-    """
-    wanted = set(fips_list)
-    part_of = {c: (combo, comps) for combo, comps in combos.items() for c in comps}
-    shares: dict[str, float] = {}
-    split = False
-    for f in wanted:
-        if f in bea["counties"]:
-            shares[f] = 1.0
-        elif f in part_of:
-            combo, comps = part_of[f]
-            if combo in shares:
-                continue
-            inside = [c for c in comps if c in wanted]
-            if len(inside) == len(comps):
-                shares[combo] = 1.0
-            else:
-                total = sum(pop.get(c) or 0 for c in comps)
-                shares[combo] = sum(pop.get(c) or 0 for c in inside) / total if total else None
-                split = True
-        else:
-            shares[f] = None  # not in BEA at all
-    filled = {f: fill_suppressed(bea["counties"].get(f, {}), bea.get("nation"), estimated) for f in shares}
-    out: dict[str, float | None] = {}
-    for line in bea["lines"]:
-        acc = 0.0
-        for f, share in shares.items():
-            v = filled[f].get(line)
-            if v is None or share is None:
-                acc = None
+    for key, rows in cov.items():
+        chosen = None
+        for basis, have in rows:
+            if n and have / n >= BASIS_SHARE:
+                chosen = basis
                 break
-            acc += v * share
-        out[line] = round(acc) if acc is not None else None
-    return out, split
+        if key == "gold":
+            chosen = rows[0][0]
+        out[key] = chosen
+    return out
+
+
+def _pct(have: int, n: int) -> str:
+    return f"{have}/{n}（{have / n:.0%}）" if n else "0"
+
+
+def yield_defs(stats: dict, ind: dict, banner_ids: list[str], bases: dict | None = None) -> list[dict]:
+    """The nation.json YIELDS list for the chosen bases: {key, icon, emoji, label, color, unit, industries, basis,
+    coverage, description}. `unit` is the chosen basis' unit (the priority-1 unit when the yield is null)."""
+    bases = bases if bases is not None else choose_bases(stats, ind, banner_ids)
+    cov = coverage(stats, ind, banner_ids)
+    n = len(banner_ids)
+    year, ind_year = stats.get("year"), ind.get("year")
+    emp_label = ind.get("basis_label") or "城镇非私营单位就业人员年末人数"
+    out = []
+    for key in YIELD_KEYS:
+        basis = bases.get(key)
+        have = dict((basis_name(b), h) for b, h in cov[key])
+        tried = "；".join(f"{BASIS_TEXT[(key, b[0])]}仅 {_pct(h, n)} 个城市有数据" for b, h in cov[key] if b != basis)
+        if key == "gold":
+            desc = (f"金币 = {year} 年{BASIS_TEXT[(key, 'cny')]}，取自各市（州、盟）及各省 {year} 年国民经济和社会发展统计公报"
+                    f"（国家统计局及各地统计局；香港、澳门为特区政府统计数据折算人民币，台湾地区暂缺）。"
+                    f"有数据的城市 {_pct(have['gdp'], n)}，其余置空（非 0）。")
+        elif basis is None:
+            desc = (f"{META[key]['label']}暂缺（全部置空，非 0）：按规则，每项产出须对所有城市使用同一口径，且该口径须覆盖至少 "
+                    f"{BASIS_SHARE:.0%} 的城市；{tried}。")
+        elif basis[0] == "persons":
+            desc = (f"{META[key]['label']} = {BASIS_TEXT[(key, 'persons')]}（{emp_label}，{ind_year} 年，各省统计年鉴分市分行业表）。"
+                    f"有数据的城市 {_pct(have[basis_name(basis)], n)}。")
+        else:
+            src = (f"{ind_year} 年，各省统计年鉴及《全国科技经费投入统计公报》" if basis[1] == "rd_expenditure"
+                   else f"{year} 年，各市（州、盟）统计公报")
+            desc = (f"{META[key]['label']} = {BASIS_TEXT[(key, 'cny')]}（{src}）。有数据的城市 {_pct(have[basis_name(basis)], n)}，"
+                    f"其余置空（非 0）。" + (f"未采用：{tried}。" if tried else ""))
+        unit, what = basis if basis is not None else BASES[key][0]
+        out.append({
+            "key": key,
+            **META[key],
+            "unit": unit,
+            "industries": list(what) if unit == "persons" else [],
+            "basis": basis_name(basis),
+            "coverage": round(have[basis_name(basis)] / n, 3) if basis is not None and n else None,
+            "description": desc,
+        })
+    return out
+
+
+def yields_of(bases: dict, stats: dict | None, ind: dict | None, year: int) -> dict:
+    """{yield key: value | None} for one record; Gold only when the GDP is of the stats `year`."""
+    out = {k: basis_value(bases.get(k), stats, ind) for k in YIELD_KEYS}
+    if (stats or {}).get("gdp_year") != year:
+        out["gold"] = None
+    return out

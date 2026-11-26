@@ -47,8 +47,9 @@ import { lodFor } from "./lod.js";
 import { rng } from "./sprites.js";
 
 /** Cities draw as a dot (on top of the terrain) rather than a full tile when hexes are small. */
+const sz = (c) => c.drawPop ?? c.sizePop ?? c.population; // display size (world.js prepareWorld); spill pseudo-cities: population
 export const cityIsDot = (city, Rpx) =>
-  Rpx < 9 || (Rpx < 18 && city.population < 2.5e5) || (Rpx < 26 && city.population < 1e5);
+  Rpx < 9 || (Rpx < 18 && !(sz(city) >= 2.5e5)) || (Rpx < 26 && !(sz(city) >= 1e5));
 
 // --- metro spill ----------------------------------------------------------------------------------------------
 const SPILL_MIN_POP = 1.5e6;
@@ -60,7 +61,7 @@ export function metroSpill(w) {
   out = new Map();
   const { grid } = w, dev = w.pct?.developed;
   for (const [cell, city] of w.cityByCell) {
-    if (!(city.population >= SPILL_MIN_POP)) continue;
+    if (!(sz(city) >= SPILL_MIN_POP)) continue;
     const cand = [];
     for (let d = 0; d < 6; d++) {
       const j = grid.neighbour(cell, d);
@@ -68,9 +69,9 @@ export function metroSpill(w) {
       cand.push([j, dev ? dev[j] || 0 : 50]);
     }
     cand.sort((a, b) => b[1] - a[1]);
-    const n = city.population >= 5e6 ? 2 : 1;
+    const n = sz(city) >= 5e6 ? 2 : 1;
     cand.slice(0, n).forEach(([j], k) => {
-      out.set(j, { id: `spill-${j}`, name: city.name, capital: false, of: city, population: (city.population >= 5e6 ? 9e5 : 5e5) / (k + 1) });
+      out.set(j, { id: `spill-${j}`, name: city.name, capital: false, of: city, population: (sz(city) >= 5e6 ? 9e5 : 5e5) / (k + 1) });
     });
   }
   spills.set(w, out);
@@ -78,7 +79,7 @@ export function metroSpill(w) {
 }
 
 /** Zoomed far out only the big cities show at all. */
-export const cityTileVisible = (city, Rpx) => !(Rpx < 9 && city.population < (Rpx < 6 ? 1e6 : 2.5e5));
+export const cityTileVisible = (city, Rpx) => !(Rpx < 9 && !(sz(city) >= (Rpx < 6 ? 1e6 : 2.5e5)));
 
 // --- size classes --------------------------------------------------------------------------------------------------
 //   extent   how far (hex apothem = 1) the paved pad reaches
@@ -832,7 +833,7 @@ function capitolItems(p, C) {
 // --- painting a whole tile ---------------------------------------------------------------------------------------
 
 function paintTile(g, city, R, Rpx, dev, detail, col, seed, capital) {
-  const cls = cityClass(city.population);
+  const cls = cityClass(sz(city));
   const sCss = Rpx / R;
   const p = new Painter(g, R, sCss, dev, detail, col);
   const items = cls.village ? paintVillage(p, seed, col, Rpx) : paintGrid(p, cls, seed, Rpx, capital);
@@ -1553,7 +1554,7 @@ export function drawCityTile(ctx, city, x, y, R, opts = {}) {
   const seed = opts.seed ?? city.cell ?? 0;
   const col = stateColor;
   if (cityIsDot(city, Rpx)) {
-    drawCityDot(ctx, x, y, R, { Rpx, s, stateColor: col, capital: isCapital(city), population: city.population });
+    drawCityDot(ctx, x, y, R, { Rpx, s, stateColor: col, capital: isCapital(city), population: sz(city) });
     return;
   }
   const lod = opts.lod ?? lodFor(Rpx);
@@ -1579,7 +1580,7 @@ export function drawCityTile(ctx, city, x, y, R, opts = {}) {
   const kS = isBig ? kDev : kB;
   let sp = null;
   if (flat && R * kS <= MAX_BIG_RPX) {
-    const key = `${seed}|${cityClass(city.population).id}|${col.join(",")}|${capital ? 1 : 0}|${RpxB.toFixed(3)}|${detail}|${kS.toFixed(4)}|${R}`;
+    const key = `${seed}|${cityClass(sz(city)).id}|${col.join(",")}|${capital ? 1 : 0}|${RpxB.toFixed(3)}|${detail}|${kS.toFixed(4)}|${R}`;
     const paint = (g, k) => paintTile(g, city, R, RpxB, k, detail, col, seed, capital);
     sp = isBig ? getSprite(bigSpriteCache, key, kS, R, paint, BIG_KEEP_MS) : getSprite(spriteCache, key, kS, R, paint);
   }

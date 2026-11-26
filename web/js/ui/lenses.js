@@ -1,6 +1,9 @@
 // Lens dock: a quick row (Terrain + the 3 most recent lenses), a grouped lens picker, and a rich legend with a
 // histogram of hex values whose ramp can be hovered or dragged to highlight a band of values on the map.
-import { compact, esc } from "../format.js";
+import { compact, esc, money } from "../format.js";
+
+// A density lens ("people per km²" in usaciv, "人/km²" or "人每平方公里" in chinaciv) prints its unit as 人/km².
+const perKm2 = (lens) => /^people|人\s*\/\s*km|人每平方公里|人\/平方公里/.test(lens?.unit || "");
 import { lensScale } from "../world.js";
 import { rampColor, parseHex } from "../color.js";
 import { icon, glyph } from "./icon.js";
@@ -13,18 +16,18 @@ const intish = (v) =>
   Number.isInteger(v) || Math.abs(v) >= 10 ? compact(v) : Math.abs(v) < 1 ? String(+v.toPrecision(1)) : v.toFixed(1);
 
 export function formatLensValue(lens, v) {
-  if (v == null || !Number.isFinite(v)) return "no data";
+  if (v == null || !Number.isFinite(v)) return "无数据";
   switch (lens.format) {
-    case "category": return lens.categories?.[Math.round(v)]?.name ?? "no data";
-    case "usd": return "$" + compact(v);
+    case "category": return lens.categories?.[Math.round(v)]?.name ?? "无数据";
+    case "usd": case "cny": case "money": return money(v);
     case "pct": return (v * 100).toFixed(v < 0.1 ? 1 : 0) + "%";
-    case "int": return intish(v) + (lens.unit?.startsWith("people") ? " /km²" : lens.unit ? " " + lens.unit : "");
-    case "minutes": return v.toFixed(0) + " min";
-    case "years": return v.toFixed(1) + " yrs";
+    case "int": return intish(v) + (perKm2(lens) ? " 人/km²" : lens.unit ? " " + lens.unit : "");
+    case "minutes": return v.toFixed(0) + " 分钟";
+    case "years": return v.toFixed(1) + " 岁";
     case "float": return (v < 10 ? v.toFixed(1) : compact(v)) + (lens.unit ? " " + lens.unit : "");
   }
-  if (lens.unit?.includes("$")) return "$" + compact(v);
-  return (v < 10 ? v.toFixed(1) : compact(v)) + (lens.unit?.startsWith("people") ? " /km²" : "");
+  if (lens.unit?.includes("$") || lens.unit?.includes("¥") || lens.unit?.includes("元")) return money(v);
+  return (v < 10 ? v.toFixed(1) : compact(v)) + (perKm2(lens) ? " 人/km²" : "");
 }
 
 // A legend tick: the number alone (a long unit such as "adherents per 100 residents" is printed once on the legend's
@@ -34,7 +37,7 @@ export function formatLensTick(lens, t, k = -1) {
   const raw = lensValueAt(lens, t);
   const v = lens.format === "int" && Number.isFinite(raw) ? Math.round(raw) : raw; // a count never reads "4.5"
   const short = (lens.format === "int" || lens.format === "float") && lens.unit && lens.unit.length > 4
-    && !(lens.format === "int" && lens.unit.startsWith("people")) ? { ...lens, unit: null } : lens;
+    && !(lens.format === "int" && perKm2(lens)) ? { ...lens, unit: null } : lens;
   let s = formatLensValue(short, v);
   const zero = Number.isFinite(v) && Math.abs(v) < 1e-9;
   if (zero) s = s.replace(/^(\$?)0\.0+(?!\d)/, (_, d) => d + "0");
@@ -50,9 +53,9 @@ export function lensValueAt(lens, t) {
   return d0 + t * (d1 - d0);
 }
 
-const TERRAIN = { id: null, icon: "terrain", emoji: "🗺️", name: "Terrain" };
-const RECENT_KEY = "civusa.recentLenses";
-const DEFAULT_RECENT = ["density", "income", "bachelors"];
+const TERRAIN = { id: null, icon: "terrain", emoji: "🗺️", name: "地形" };
+const RECENT_KEY = "chinaciv.recentLenses";
+const DEFAULT_RECENT = ["density", "elevation", "forest"];
 const BINS = 40;
 const HOVER_HALF = 0.08; // half-width of the hover band, in ramp units
 const QUANT = 80; // band edges snap to 1/80 of the ramp so tiny mouse moves don't re-render the map
@@ -97,22 +100,23 @@ export function initLensDock(opts) {
   const isActive = (l) => (l.id ?? null) === (active?.id ?? null);
   const quickBtn = (l) =>
     `<button class="lens-btn ${isActive(l) ? "active" : ""}" data-id="${esc(l.id ?? "")}" aria-pressed="${isActive(l)}"
-      title="${esc(l.name)}${l.id ? " lens" : " (no lens)"}">${glyph(l, 15)}<span>${esc(l.name)}</span></button>`;
+      title="${esc(l.name)}${l.id ? " 透镜" : "（无透镜）"}">${glyph(l, 15)}<span>${esc(l.name)}</span></button>`;
 
   function renderQuick() {
     const row = [TERRAIN, ...recent.map((id) => byId.get(id)).filter(Boolean)];
     quick.innerHTML = row.map(quickBtn).join("");
     const inRow = !active || recent.includes(active.id);
     moreBtn.classList.toggle("active", !inRow);
-    moreBtn.innerHTML = `${icon("layers", "▤", { size: 15 })}<span>${inRow ? "Lenses" : esc(active.name)}</span><span class="caret" aria-hidden="true">▾</span>`;
-    moreBtn.title = "All lenses (L cycles)";
+    moreBtn.innerHTML = `${icon("layers", "▤", { size: 15 })}<span>${inRow ? "透镜" : esc(active.name)}</span><span class="caret" aria-hidden="true">▾</span>`;
+    moreBtn.title = "全部透镜（L 键循环切换）";
     moreBtn.hidden = !lenses.length;
+    quick.hidden = !lenses.length; // no lenses.json (chinaciv phase 1): a lone 地形 button would do nothing
   }
 
   function renderPicker() {
     const groups = [...(lensFile?.groups || [])];
     const known = new Set(groups.map((g) => g.id));
-    if (lenses.some((l) => !known.has(l.group))) groups.push({ id: "__other", name: "Other" });
+    if (lenses.some((l) => !known.has(l.group))) groups.push({ id: "__other", name: "其他" });
     const tile = (l) => `<button class="lp-tile ${isActive(l) ? "active" : ""}" data-id="${esc(l.id ?? "")}" aria-pressed="${isActive(l)}"
         title="${esc(l.description || l.name)}">
         <span class="lp-ic">${glyph(l, 20)}</span><span class="lp-nm">${esc(l.name)}</span>
@@ -120,9 +124,9 @@ export function initLensDock(opts) {
       </button>`;
     const sec = (g, items) => !items.length ? "" : `<section class="lp-group"><h4>${icon(g.icon || `g-${g.id}`, "", { size: 14 })}${esc(g.name)}</h4>
         <div class="lp-tiles">${items.map(tile).join("")}</div></section>`;
-    picker.innerHTML = `<div class="lp-head"><span>Choose a lens</span><button class="icon-btn lp-close" aria-label="Close lens picker">${icon("close", "✕", { size: 12 })}</button></div>
+    picker.innerHTML = `<div class="lp-head"><span>选择透镜</span><button class="icon-btn lp-close" aria-label="关闭透镜选择">${icon("close", "✕", { size: 12 })}</button></div>
       <div class="lp-body">
-      ${sec({ id: "base", name: "Base map", icon: "terrain" }, [TERRAIN])}
+      ${sec({ id: "base", name: "底图", icon: "terrain" }, [TERRAIN])}
       ${groups.map((g) => sec(g, lenses.filter((l) => (g.id === "__other" ? !known.has(l.group) : l.group === g.id)))).join("")}
       </div>`;
   }
@@ -235,17 +239,17 @@ export function initLensDock(opts) {
   function renderCategoricalLegend(l) {
     const counts = catCounts(l);
     const sw = l.categories.map((c, k) => `<button type="button" class="lg-cat" data-k="${k}" aria-pressed="false"
-        title="${esc(c.description || c.name)} (${counts[k]} hexes)"><i style="background:${esc(c.color || l.ramp[k] || "#888")}"></i><span>${esc(c.name)}</span></button>`).join("");
+        title="${esc(c.description || c.name)} （${counts[k]} 个六边形）"><i style="background:${esc(c.color || l.ramp[k] || "#888")}"></i><span>${esc(c.name)}</span></button>`).join("");
     legend.hidden = false;
     legend.innerHTML = `
       <div class="lg-head"><span class="lg-ic">${glyph(l, 18)}</span><span class="title">${esc(l.name)}</span>
-        <button class="icon-btn lg-more" aria-expanded="${legendExpanded}" aria-label="Show the full legend" title="Details">${legendExpanded ? "−" : "+"}</button>
-        <button class="icon-btn lg-close" aria-label="Turn the lens off (back to terrain)" title="Back to terrain">${icon("close", "✕", { size: 11 })}</button></div>
+        <button class="icon-btn lg-more" aria-expanded="${legendExpanded}" aria-label="显示完整图例" title="详情">${legendExpanded ? "−" : "+"}</button>
+        <button class="icon-btn lg-close" aria-label="关闭透镜（回到地形）" title="回到地形">${icon("close", "✕", { size: 11 })}</button></div>
       <div class="desc">${esc(l.description || l.unit || "")}</div>
       ${noteHtml(l)}
-      <div class="lg-cats" role="group" aria-label="${esc(l.name)} categories: click one to show only it">${sw}</div>
+      <div class="lg-cats" role="group" aria-label="${esc(l.name)}类别：点击某一类只显示它">${sw}</div>
       <div class="lg-meta"><span class="src">${sourceLine(l)}</span></div>
-      <div class="lg-hint" aria-live="polite">Click a category to show only it</div>`;
+      <div class="lg-hint" aria-live="polite">点击某一类别，只显示该类</div>`;
     legend.querySelector(".lg-close").onclick = () => opts.onPick(null);
     legend.classList.toggle("expanded", legendExpanded);
     legend.querySelector(".lg-more").onclick = () => {
@@ -272,7 +276,7 @@ export function initLensDock(opts) {
     });
     legend.querySelector(".lg-cats")?.classList.toggle("filtered", !!band);
     if (hint) {
-      hint.textContent = picked >= 0 ? `Showing only ${l.categories[picked].name}` : "Click a category to show only it";
+      hint.textContent = picked >= 0 ? `只显示：${l.categories[picked].name}` : "点击某一类别，只显示该类";
       hint.classList.toggle("on", picked >= 0);
     }
   }
@@ -289,16 +293,16 @@ export function initLensDock(opts) {
     const ticks = [0, 0.25, 0.5, 0.75, 1]
       .map((t, k) => `<span style="left:${t * 100}%;transform:translateX(-${t * 100}%)">${esc(formatLensTick(l, t, k))}</span>`)
       .join("");
-    const hib = l.higher_is === "good" ? `<span class="hib good">▲ Higher is better</span>`
-      : l.higher_is === "bad" ? `<span class="hib bad">▲ Higher is worse</span>` : "";
+    const hib = l.higher_is === "good" ? `<span class="hib good">▲ 越高越好</span>`
+      : l.higher_is === "bad" ? `<span class="hib bad">▲ 越高越差</span>` : "";
     legend.hidden = false;
     legend.innerHTML = `
       <div class="lg-head"><span class="lg-ic">${glyph(l, 18)}</span><span class="title">${esc(l.name)}</span>
-        <button class="icon-btn lg-more" aria-expanded="${legendExpanded}" aria-label="Show the full legend" title="Details">${legendExpanded ? "−" : "+"}</button>
-        <button class="icon-btn lg-close" aria-label="Turn the lens off (back to terrain)" title="Back to terrain">${icon("close", "✕", { size: 11 })}</button></div>
+        <button class="icon-btn lg-more" aria-expanded="${legendExpanded}" aria-label="显示完整图例" title="详情">${legendExpanded ? "−" : "+"}</button>
+        <button class="icon-btn lg-close" aria-label="关闭透镜（回到地形）" title="回到地形">${icon("close", "✕", { size: 11 })}</button></div>
       <div class="desc">${esc(l.description || l.unit || "")}</div>
       ${noteHtml(l)}
-      <div class="lg-scale" role="slider" tabindex="0" aria-label="Highlight a range of ${esc(l.name)} values. Hover or drag; arrow keys move the highlight, Escape clears it."
+      <div class="lg-scale" role="slider" tabindex="0" aria-label="高亮${esc(l.name)}的一个取值区间。悬停或拖动；方向键移动高亮区间，Esc 清除。"
         aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
         <canvas class="lg-hist" aria-hidden="true"></canvas>
         <div class="ramp" style="background:linear-gradient(90deg, ${l.ramp.map(esc).join(",")})"><div class="band-mark" hidden></div></div>
@@ -306,7 +310,7 @@ export function initLensDock(opts) {
       <div class="ticks">${ticks}</div>
       ${l.unit ? `<div class="lg-unit">${esc(l.unit)}</div>` : ""}
       <div class="lg-meta">${hib}<span class="src">${l.unit ? esc(l.unit) + " · " : ""}${sourceLine(l)}</span></div>
-      <div class="lg-hint" aria-live="polite">Hover or drag the scale to show only that range</div>`;
+      <div class="lg-hint" aria-live="polite">悬停或拖动刻度，只显示该区间</div>`;
     legend.querySelector(".lg-close").onclick = () => opts.onPick(null);
     legend.classList.toggle("expanded", legendExpanded);
     legend.querySelector(".lg-more").onclick = () => {
@@ -354,7 +358,7 @@ export function initLensDock(opts) {
     if (!mark || !active) return;
     if (!band) {
       mark.hidden = true;
-      hint.textContent = "Hover or drag the scale to show only that range";
+      hint.textContent = "悬停或拖动刻度，只显示该区间";
       hint.classList.remove("on");
     } else {
       const a = Math.max(0, band[0]), b = Math.min(1, band[1]);
@@ -363,9 +367,9 @@ export function initLensDock(opts) {
       mark.style.width = Math.max(0.5, (b - a) * 100) + "%";
       const lo = band[0] <= 0 ? "≤ " + formatLensValue(active, lensValueAt(active, b)) : null;
       const hi = band[1] >= 1 ? "≥ " + formatLensValue(active, lensValueAt(active, a)) : null;
-      const txt = band[0] <= 0 && band[1] >= 1 ? "all values"
+      const txt = band[0] <= 0 && band[1] >= 1 ? "全部取值"
         : lo || hi || `${formatLensValue(active, lensValueAt(active, a))} – ${formatLensValue(active, lensValueAt(active, b))}`;
-      hint.textContent = `Showing only ${txt}`;
+      hint.textContent = `只显示：${txt}`;
       hint.classList.add("on");
       scale.setAttribute("aria-valuenow", String(Math.round(((a + b) / 2) * 100)));
     }

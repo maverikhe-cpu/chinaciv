@@ -1,7 +1,12 @@
 import { css } from "../color.js";
-import { esc } from "../format.js";
+import { esc, int } from "../format.js";
 import { isCapital } from "../world.js";
-import { yieldGrid, amenities, industries, gdpRow, popLine, growthSpan, showPanel, hidePanel } from "./infoPanel.js";
+import { yieldGrid, amenities, industries, gdpRow, sectors, popLine, growthSpan, showPanel, hidePanel } from "./infoPanel.js";
+
+// A city's provinces: cities.json `states` holds province codes (chinaciv) or postal codes (usaciv test data).
+export function provinceIndex(w, ref) {
+  return w.raw.states.findIndex((s) => s.fips === ref || s.abbr === ref);
+}
 
 /**
  * ctx: {w, nation, onClose, onPedia, onState(stateIndex)}
@@ -12,30 +17,43 @@ export function openCityPanel(city, ctx) {
   const owner = city.cell != null ? w.raw.owner[city.cell] : -1;
   const col = css(w.stateColor[owner] || [190, 190, 190]);
 
-  // The city's states as links to their state panels.
+  // The city's province(s) as links to their panels.
   const states = (city.states || [])
-    .map((abbr) => ({ abbr, i: w.raw.states.findIndex((s) => s.abbr === abbr) }))
-    .map(({ abbr, i }) => (i >= 0 && ctx.onState
-      ? `<button class="chip" data-state="${i}" title="Open ${esc(w.raw.states[i].name)}">${esc(abbr)}</button>`
-      : `<span class="chip">${esc(abbr)}</span>`))
+    .map((ref) => ({ ref, i: provinceIndex(w, ref) }))
+    .map(({ ref, i }) => {
+      const st = i >= 0 ? w.raw.states[i] : null;
+      const label = st ? st.full || st.name : ref;
+      return st && ctx.onState
+        ? `<button class="chip" data-state="${i}" title="打开${esc(st.full || st.name)}">${esc(label)}</button>`
+        : `<span class="chip">${esc(label)}</span>`;
+    })
     .join("");
 
   const growth = growthSpan(city, n);
+  const econ = gdpRow(city) + amenities(city, n);
+  const sec = sectors(city);
+  const srcs = [nation.vintage, nation.gdp_vintage && nation.gdp_vintage !== nation.vintage ? `GDP：${nation.gdp_vintage}` : ""].filter(Boolean);
 
   showPanel({
     kind: "city",
+    kindLabel: city.kind_label || "城市",
     stripe: col,
     title: city.name,
-    titleHtml: `${isCapital(city) ? `<span class="cap" title="National capital">★</span> ` : ""}${esc(city.name)}`,
-    sub: `${esc(city.full || "")}${states ? `<div class="chips">${states}</div>` : ""}`,
-    headExtra: popLine(city, growth),
+    titleHtml: `${isCapital(city) ? `<span class="cap" title="首都">★</span> ` : ""}${esc(city.name)}`,
+    sub: `${esc(city.full && city.full !== city.name ? city.full : "")}${states ? `<div class="chips">${states}</div>` : ""}`,
+    headExtra: city.population != null
+      ? popLine(city, growth)
+      : city.pop_census_2020 != null
+        ? `<div class="cp-pop">常住人口（${esc(nation.census_year || 2020)} 年七普）<b>${int(city.pop_census_2020)}</b><span class="muted">　${esc(nation.year || "")} 年数据暂缺</span></div>`
+        : `<div class="cp-pop muted">常住人口：无数据</div>`,
     sections: [
-      { title: "Yields", html: `<div class="yield-grid">${yieldGrid(nation, city.yields)}</div>` },
-      { title: "Amenities &amp; Housing", html: amenities(city, n) + gdpRow(city) },
-      { title: "Districts · where people work", html: industries(city, nation) },
+      { title: "产出", html: `<div class="yield-grid">${yieldGrid(nation, city.yields)}</div>` },
+      econ && { title: "经济", html: econ },
+      sec && { title: "三次产业", html: sec },
+      city.jobs && { title: "就业结构 · 各行业从业人员", html: industries(city, nation) },
+      city.note && { title: "数据说明", html: `<p class="muted">${esc(city.note)}</p>` },
     ],
-    foot: `Source: ${esc(nation.vintage)} (tables C24030, B19025, B19013, B25064, B25077, B23025)${nation.gdp_vintage ? `; GDP: ${esc(nation.gdp_vintage)}` : ""}.
-      Green ×N = this industry's share of jobs is N× the U.S. share.`,
+    foot: `来源：${esc(srcs.join("；"))}。${city.jobs ? "绿色 ×N 表示该行业就业占比为全国的 N 倍。" : ""}`,
     onClose: ctx.onClose,
     onPedia: ctx.onPedia,
     wire(panel) {

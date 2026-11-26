@@ -6,8 +6,9 @@
   --panel: rgba(16, 25, 35, 0.98);
   --panel-2: rgba(28, 41, 56, 0.98);
   --line: rgba(201, 164, 92, 0.55);
-  --serif: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
-  --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  /* 中文字体：思源宋体（Google Fonts，可选）→ 系统宋体；无衬线用苹方 / 微软雅黑。 */
+  --serif: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Noto Serif SC", "Source Han Serif SC", "Source Han Serif CN", "Songti SC", STSong, SimSun, serif;
+  --sans: -apple-system, "Segoe UI", system-ui, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --topbar-h: 40px;
 }
 

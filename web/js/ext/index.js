@@ -2,8 +2,9 @@
 // `app` is the API object built in main.js (also window.__app). A missing folder is fine: it is reported with
 // console.info and skipped, so an extension can be left out without breaking the app. A failing install() is logged
 // as an error and does not stop the others. Modules are fetched in parallel and installed in list order.
-// layers/: static map layers (roads, rail, ports, forts, wonders, trade routes) and their toggles.
-const MODULES = ["./cityView/index.js", "./advisors/index.js", "./layers/index.js"];
+// layers/: static map layers (expressways, rail, airports, ports, wonders) and their toggles.
+// Phase 1 ships no advisors dashboard (usaciv's ext/advisors was US-specific and English; a port is a phase-2 idea).
+const MODULES = ["./cityView/index.js", "./layers/index.js"];
 
 export async function installExtensions(app, list = MODULES) {
   const loads = list.map((spec) => import(spec).then((m) => ({ m }), (err) => ({ err })));

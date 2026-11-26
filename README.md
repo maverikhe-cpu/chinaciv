@@ -1,235 +1,187 @@
-# usaciv: the United States as a strategy game, built from real data
+# chinaciv（文明中国）：用真实数据画成策略游戏地图的中国
 
-**Live: [karpathy.ai/usaciv](https://karpathy.ai/usaciv)** · Source code:
-[usaciv-source.zip](https://karpathy.ai/usaciv/usaciv-source.zip) (also linked from the in-app help, `?`)
+![全国视图：六边形地形、河流、省名、城市旗标，右下角为南海诸岛附图](docs/images/hero-cn.jpg)
 
-![The lower 48 drawn as a 4X strategy map: painted hex terrain, rivers, state names and bronze city banners](docs/images/hero.jpg)
+> **本地图仅供个人学习，未申请审图号。** 国界、省界与南海断续线依据阿里云 DataV.GeoAtlas 行政区划数据
+> （源自高德开放平台，依据标准地图）绘制；邻国轮廓仅作背景，取自 Natural Earth（中国视角版）。
 
-A visualizer (not a game) that draws the **real** United States like a turn-based strategy map. Hex terrain comes
-from elevation and land-cover data. Cities have yield banners built from GDP and job counts. Resources are real
-power plants, mines and shale plays. Roads, railroads, ports, forts and wonders sit on the tiles. There are lenses,
-a City View with citizens and districts, and a council of Advisors for slicing the data. Every number traces back
-to a public source in the in-app **Almanac**.
+chinaciv 是一个**可视化作品（不是游戏）**：把真实的中华人民共和国画成回合制 4X 策略游戏（《文明》风格）的六边形地图。
+地形来自真实高程与土地覆盖；每个地级行政区都有一面城市旗标，上面的人口与产出来自统计公报；铁路、高速公路、机场、
+港口、发电厂、矿山、油气田和奇观都画在它们所在的地块上。每一个数字都能在应用内的**百科 → 数据来源**里追溯到出处。
 
-It is a static site: plain ES modules and Canvas 2D, with no framework, no npm and no build step. The data is built
-by a small Python pipeline that uses only the standard library, from public downloads that need no API keys.
+本项目改编自 Andrej Karpathy 的 [usaciv](https://karpathy.ai/usaciv)（MIT 许可证），沿用其架构与全部手绘代码美术，
+把数据管线和界面改成中国版、简体中文。
+
+它是一个静态网站：原生 ES 模块 + Canvas 2D，没有框架、没有 npm、没有构建步骤。数据由一个只用 Python 标准库的小管线
+从公开下载生成，不需要任何 API 密钥。
 
 <table>
   <tr>
-    <td><img src="docs/images/east-coast.jpg" alt="The Northeast at mid zoom: Interstates and railroads between city tiles, ports, universities and the city banners of New York, Philadelphia, Baltimore and Washington"></td>
-    <td><img src="docs/images/california.jpg" alt="Central California up close: the snowy Sierra, Central Valley farmland and the coast from San Luis Obispo to Los Angeles"></td>
+    <td><img src="docs/images/south-cn.jpg" alt="华南与台湾：高速铁路、高速公路、港口和城市旗标，南海诸岛附图"></td>
+    <td><img src="docs/images/north-cn.jpg" alt="华北平原与长江下游：耕地、铁路网与城市"></td>
   </tr>
   <tr>
-    <td><img src="docs/images/rockies.jpg" alt="The Rockies and the Colorado Plateau: snow-capped ranges, mesas, the Great Basin, Denver and Salt Lake City"></td>
-    <td><img src="docs/images/lens-income.jpg" alt="The income lens: every county coloured by median household income"></td>
+    <td><img src="docs/images/cityview-shenzhen.jpg" alt="深圳的城市界面：人口、GDP、三次产业与排名"></td>
+    <td><img src="docs/images/tibet-cn.jpg" alt="青藏高原、藏南地区与西南"></td>
   </tr>
 </table>
 
-## What's in it
+## 第一阶段包含什么
 
-- **The map.** Painted hex terrain: forests, crop patchwork, wooded hills, snowy ranges, Great Basin ranges and
-  playas, Colorado Plateau mesas, marsh and suburbs. Coasts and lakes are smoothed. There are rivers and state
-  colours. Cities grow from villages into skylines across several hexes. All art is drawn in code.
-- **Yields.** The top bar and the city banners show Food, Production, Gold, Science and Culture. Gold is GDP from BEA.
-  The others are job counts by industry from the ACS. Click a yield for a report with leaderboards.
-- **Tile improvements.** Interstates and major highways, railroads, the principal ports (ranked by tonnage) and the
-  busiest airports. Turn them on and off from the **Map** menu.
-- **Military.** DoD installations are drawn as forts, one glyph per service, and the largest ranges as restricted
-  ground. The Military advisor has troops and defense dollars by state.
-- **Wonders.** 52 wonders, each chosen by a published rule: the most-visited national parks, the R1 universities
-  with the most R&D, and a set of landmarks.
-- **Trade routes.** The largest interstate freight flows between metro areas (FAF5) are drawn as caravan arcs.
-- **Lenses.** Colour every county by income, degrees, poverty, growth, broadband, homeownership, land cover, faith,
-  wellbeing, disasters, veterans and more. The legend is a histogram you can brush, and it states the caveats.
-- **City View.** Click a city:
-  - Its **citizens** appear as rows of little figures by occupation, age, commute, education and origin, so
-    San Jose's row looks different from Elkhart's.
-  - Its **districts** come from real industry specialisation (BLS QCEW location quotients): Campus, Commercial hub,
-    Industrial zone, Harbor, Theater square, Aerodrome and others. It gets a city-type badge such as
-    "Tech city" or "Motor city".
-  - It also shows GDP by industry, the workforce, resource sites, peer cities and the metro's hexes on the map.
-- **Advisors.** Docked dashboards for Energy & Resources, Economy, People, Prosperity & Housing, Knowledge, Land,
-  Military, Commerce and Culture, each linked both ways with the map. The **Explorer** turns any column of
-  states, metros or 3,100+ counties into a table and a scatter plot, and highlights your selection on the map.
-- **Sharing and navigation.**
-  - Every view has a link (the URL hash holds it), and share images are rendered off-screen.
-  - Search with `/`; press `?` for keyboard help.
-  - Works on phones.
-- **Art gallery** at `/dev/art.html`: every terrain, city, water, icon, banner and map-layer specimen at four zoom
-  levels, for working on the art.
-- **Trailer maker** at `/dev/trailer.html`: renders a 30-second 1080p MP4 trailer of the map frame by frame,
-  entirely in the browser (WebCodecs H.264 and AAC, and a small hand-written MP4 writer, with no tools to install).
-  Its soundtrack is an original score synthesised in code with the Web Audio API and timed to the cuts
-  (`web/dev/trailer/score.js`). The shots, captions, title and URL are in `web/dev/trailer/storyboard.js`.
+- **地图**：25 公里六边形网格（Albers 等积圆锥投影，128×120 格，约 5,840 个中国陆地格）。地形取自 ETOPO1 高程与
+  MODIS 土地覆盖（2024），画出森林、耕地、草原、荒漠、雪山、湖泊和主要河流；省份按颜色区分并标注中文名。
+- **疆域**：按标准地图绘制，含台湾省、香港、澳门、海南、藏南地区、阿克赛钦地区；南海诸岛与完整的十段断续线画在右下角
+  **南海诸岛附图**中（同一投影，比例为主图的 30%），主图上画出邻近台湾的断续线段；钓鱼岛、赤尾屿以中国地名标注。
+- **城市**：344 面城市旗标 —— 333 个地级行政区（293 地级市、7 地区、30 自治州、3 盟）中除三沙市外的 332 个、
+  4 个直辖市、香港、澳门，以及台湾省 6 个主要城市。三沙市没有陆地格子，仅作标注。
+- **产出（顶栏与旗标）**：
+  | 产出 | 对应的真实指标（2023 年） | 覆盖 |
+  |---|---|---|
+  | 💰 金币 | 地区生产总值 GDP（元） | 320/344 个城市（大陆与港澳 320/338） |
+  | 🌾 粮食 | 第一产业增加值（元） | 280/344 |
+  | ⚙️ 生产力 | 第二产业增加值（元） | 280/344 |
+  | 🔬 科研 | 暂缺：分行业就业（I+M）仅 30 个城市、R&D 经费仅 43 个城市有数据 | – |
+  | 🎭 文化 | 暂缺：分行业就业（R）仅 30 个城市有数据 | – |
 
-## Quick start
+  每项产出对所有城市使用**同一口径**，且该口径须覆盖至少 75% 的城市，否则整项留空；没有数据的城市一律为空（显示“–”），
+  从不记为 0。映射规则写在 `pipeline/build/yields.py`，也发布在 nation.json 和百科的“产出”页。
+- **地块改良**：高速铁路（≥200 km/h，带红色刻度的亮色线）、普速干线铁路、高速公路（OpenStreetMap）；旅客吞吐量
+  ≥100 万人次的 109 个机场（民航局 2025 年公报）；货物吞吐量前 30 的主要港口（交通运输部 2025 年数据）。
+- **资源**：523 处 —— 核电、大型水电与抽水蓄能、煤电、气电、风电与光伏集群、地热；大型煤矿、铁矿与精选的金属矿
+  （铜、锂、铅锌、稀土、钨、金、锑、铝土）；油田与气田。入选门槛写在 resources.json 的 `rule` 中。
+- **奇观**（143 处，均按公开规则选取）：全部 61 项世界遗产、5 个国家公园、首批 5A 级景区中未被世界遗产覆盖的 36 处、
+  41 所首轮“一流大学建设高校”（不含军队院校）。
+- **城市界面**：点击城市打开，含人口、GDP、三次产业、交通与奇观、资源和同规模城市比较（如
+  `#city=440300&view=city` 打开深圳）。
+- **百科（Almanac）**：关于本图、地图说明（审图说明与边界来源）、产出、省份、地形、资源、地块改良、奇观、数据来源
+  （每个来源的发布者、许可、所用文件的网址与下载日期）。
+- **分享与导航**：地址栏始终保存当前视图；`/` 搜索城市和省份（支持全称、简称），`?` 查看快捷键；手机可用。
 
-You need [uv](https://docs.astral.sh/uv/), which fetches a suitable Python for you (3.11+). Nothing else needs
-installing.
+## 快速开始
+
+需要 [uv](https://docs.astral.sh/uv/)（会自动准备 Python 3.11+），无需安装其他东西。
 
 ```bash
 uv run python -m pipeline serve        # http://127.0.0.1:8765
 ```
 
-The built data (`web/data/`, about 6 MB) is included, so that is all it takes to run it. `web/` is a self-contained
-static site that you can upload to any static host (Netlify, S3, GitHub Pages…).
+`web/data/`（约 3 MB）已生成好，直接运行即可；`web/` 是一个自包含的静态网站。
 
-To make a deploy package:
-
-```bash
-uv run python -m pipeline package      # → usaciv.zip: one file to upload
-```
-
-`usaciv.zip` unzips to a `usaciv/` folder: `web/` without the dev pages, plus `usaciv-source.zip`: this whole project, minus downloads and
-caches, which the in-app help links to. If you publish your own copy, change the address `karpathy.ai/usaciv` in
-`web/index.html` (the social-card tags), in `SITE_URL` in `web/js/app/share.js` (printed on share images) and in
-`web/dev/trailer/storyboard.js`.
-
-To rebuild the data from the original publishers:
+从原始发布者重新生成数据：
 
 ```bash
-uv run python -m pipeline all          # download (cached) → process → build web/data/*.json → check
+uv run python -m pipeline all          # 下载（有缓存）→ 处理 → 生成 web/data/*.json → 校验
+uv run python -m pipeline all --offline   # 只用已缓存的下载，不联网
+uv run python -m unittest discover -s tests
 ```
 
-The first full run downloads about 500 MB into `data/raw/` (not included in the source zip). Later runs reuse the cache.
+首次完整运行会向 `data/raw/` 下载约 600 MB（DataV 边界、Overpass 线路切片、GEM 能源数据、MODIS 瓦片等），之后复用缓存。
+个别镜像（如 maps.mail.ru 的 Overpass）在 macOS 上可能需要把 `SSL_CERT_FILE` 指向系统根证书，见
+`pipeline/sources/cn_rail_roads.py` 的说明。
 
-## How it works
+### 命令
+
+```bash
+uv run python -m pipeline list                        # 数据源与构建器（按构建顺序）
+uv run python -m pipeline fetch [source …]            # 下载原始文件（有缓存；--force 重新下载）
+uv run python -m pipeline process [source …]          # 原始文件 → data/interim/<source>.json
+uv run python -m pipeline build [builder …]           # interim → web/data；已是最新的会跳过（--deps 连同上游）
+uv run python -m pipeline check                       # 校验 web/data 并输出数据质量报告（有 FAIL 时退出码 1）
+uv run python -m pipeline serve [--port 8765]         # 本地服务 web/
+uv run python -m pipeline package                     # chinaciv.zip：可上传的网站，内含源码 chinaciv-source.zip
+```
+
+## 工作原理
 
 ```
 pipeline/
-  core/       shared plumbing: cached downloads with a provenance manifest (fetch.py), the Source base class,
-              projection (geo.py), hex grid (hexgrid.py), atomic JSON IO (store.py)
-  sources/    one module per data source: fetch() raw files, process() → data/interim/<id>.json
-  build/      builders that put the sources onto the hex map → web/data/*.json
-  check.py    validates web/data against docs/DATA_CONTRACTS.md and prints a data-quality report
-tests/        unittest suite (standard library only)
-web/
-  js/         main.js (app shell), camera, hex grid (mirrors pipeline/core/hexgrid.py),
-              render/ (map layers, banners, off-screen snapshots) and render/art/ (all the tile art),
-              ui/ (panels, lenses, Almanac, minimap), app/ (app API, search, sharing, URL state),
-              ext/ (extensions: City View, Advisors, map layers)
-  data/       the generated JSON the browser loads
-  dev/        the art gallery
-docs/         DATA_CONTRACTS.md: the shape of every web/data file, shared by pipeline and browser
+  core/       公共部件：带来源清单的缓存下载（fetch.py）、Source 基类、中国 Albers 投影与南海附图投影（geo.py）、
+              六边形网格（hexgrid.py）、省份/特殊编号表（china.py）
+  sources/    每个发布者一个模块：fetch() 下载原始文件，process() → data/interim/<id>.json
+  build/      构建器：把数据放到六边形地图上 → web/data/*.json（world, cities, states, infrastructure,
+              resources, wonders, catalog）；locate.py 负责经纬度 → 格子/县/市/省
+  check.py    按 docs/DATA_CONTRACTS.md 校验 web/data，输出数据质量报告
+tests/        unittest 测试（仅标准库）
+web/          静态网站：js/（地图渲染、城市旗标、面板、百科）、js/render/china.js（断续线与南海诸岛附图）、
+              js/ext/（城市界面、地图图层两个扩展）、data/（生成的 JSON）、dev/（美术样张）
+docs/         DATA_CONTRACTS.md（每个数据文件的格式，管线与浏览器共同遵守）、CN_PLAN.md（设计决定与决策日志）
 ```
 
-The flow is always **source → interim → builder → web/data**:
+流程始终是 **数据源 → interim → 构建器 → web/data**。`catalog` 根据各数据源的下载清单生成 `sources.json`
+（每个文件的网址、sha256、大小和日期），这就是百科里的参考文献；`check` 是最后的关口。
 
-- **Sources** know nothing about hexes or the UI. Each one turns a publisher's files into tidy JSON. Any `Source`
-  subclass with a `SourceInfo` is discovered automatically.
-- **Builders** put that data onto the shared 25 km hex grid (an Albers equal-area projection). They declare
-  `REQUIRES` and `PRODUCES`, run in dependency order and are skipped when they are up to date. A builder may define
-  `check(web_dir)` to add its own lines to the data-quality report.
-- **`catalog`** writes `sources.json` from the source registry and the download manifests (URL, sha256, size and
-  date of every file). That is the Almanac's bibliography, so provenance stays accurate automatically.
-- **`check`** is the gate: every line is PASS, NOTE, WARN or FAIL, and any FAIL exits 1.
+编号约定：省级用 2 位代码（如 `"44"`），城市用 6 位地级区划代码（直辖市、特别行政区用省级代码 `110000`、`810000`），
+县级用 6 位区划代码；台湾 6 市的 `710100`–`710600` 为本项目自定（非官方代码）。金额单位为人民币元。
 
-The browser side has a small app API (`web/js/app/api.js`, documented in `docs/DATA_CONTRACTS.md`). The City View,
-the Advisors and the map layers are all **extensions** built on it, and so can anything you add:
-- `registerStaticLayer` draws into the cached map.
-- `registerOverlay` draws per frame.
-- `registerMode` and `ui.dock` give you a docked screen.
-- `addMapToggle` adds a switch to the Map menu.
-- `loadData` lazy-loads a data file.
-- `setHighlight` links a view to the map.
+## 数据来源
 
-### Commands
+全部公开，均无需 API 密钥。百科的“数据来源”页列出了实际使用的每个文件。
 
-```bash
-uv run python -m pipeline list                        # sources and builders (in build order)
-uv run python -m pipeline fetch [source …]            # download raw files (cached; --force re-downloads)
-uv run python -m pipeline process [source …]          # raw → data/interim/<source>.json
-uv run python -m pipeline build [builder …]           # interim → web/data; up-to-date builders are skipped
-uv run python -m pipeline build cities --deps         # …also run the builders `cities` depends on
-uv run python -m pipeline build --force               # rebuild everything
-uv run python -m pipeline check                       # validate web/data + data-quality report (exit 1 on FAIL)
-uv run python -m pipeline all [--offline]             # fetch + process + build + check
-uv run python -m pipeline serve [--port 8765]         # serve web/
-uv run python -m pipeline package                     # usaciv.zip: the site to upload, with the source inside
-uv run python -m unittest discover -s tests           # tests
-```
-
-`--offline` never touches the network: it uses the newest complete cached release of each source.
-
-### Adding a data source
-
-1. Create `pipeline/sources/<name>.py` with a `Source` subclass. Give it a `SourceInfo` (title, publisher,
-   license, description, what it's used for), a `fetch()` that calls `self.download(url, filename)`, and a
-   `process()` that returns a dict.
-2. Use it from a builder: extend an existing one or add a module to `pipeline/build/` with `REQUIRES`, `PRODUCES`
-   and `build()`. A new lens is just another entry in `lenses.json`. Document any new file shape in
-   `docs/DATA_CONTRACTS.md`.
-3. Run `uv run python -m pipeline fetch <name> && uv run python -m pipeline process <name> && uv run python -m pipeline build --deps <builder> && uv run python -m pipeline check`.
-
-## Data sources
-
-All are public and none needs an API key: 31 sources in all. The Almanac (open it from the top bar) lists the exact
-files, URLs, checksums and caveats.
-
-| Source | Publisher | Used for |
+| 数据 | 发布者 / 出处 | 用途 |
 |---|---|---|
-| Cartographic boundaries 2023, 1:20M | U.S. Census Bureau | Land vs. water, state borders, county lookup |
-| Gazetteer 2024 | U.S. Census Bureau | City locations, county land area |
-| CBSA delineation files, July 2023 | Census / OMB | Metro member counties, principal cities |
-| American Community Survey 1-year (2025) | U.S. Census Bureau | City and state yields and panels, citizens, the national top bar |
-| American Community Survey 5-year (2024) | U.S. Census Bureau | County lenses, veterans |
-| Population estimates (vintage 2025) | U.S. Census Bureau | Population growth, yearly metro population |
-| CAGDP2, GDP by county and industry | Bureau of Economic Analysis | Gold yield (GDP), GDP by industry |
-| ETOPO1 via ERDDAP | NOAA NCEI | Relief, hill-shading, ocean depth |
-| NLCD 2021 | USGS / MRLC | Land cover |
-| Natural Earth 1:50m and 1:10m | Natural Earth | Neighbouring countries, lakes, rivers, roads, railroads |
-| EIA-860M generator inventory | Energy Information Administration | Power plants |
-| Mine-level coal production | Energy Information Administration | Coal mines |
-| Mines data set | Mine Safety and Health Administration | Mine locations, metal mines |
-| Tight oil & shale gas plays | Energy Information Administration | Oil and gas resources |
-| QCEW annual averages by county | Bureau of Labor Statistics | Districts and city-type badges |
-| Principal Ports of the United States | U.S. Army Corps of Engineers | Ports |
-| Enplanements, all-cargo data, NASR | Federal Aviation Administration | Airports |
-| Freight Analysis Framework FAF5 | FHWA / BTS | Trade routes |
-| MIRTA installations and ranges, FY2025 | Department of Defense | Forts, restricted ground |
-| Personnel by duty state | Defense Manpower Data Center | Troops by state |
-| Defense Spending by State | DoD Office of Local Defense Community Cooperation | Defense dollars by state |
-| Park boundaries; Visitor Use Statistics | National Park Service | Park wonders, protected land |
-| National Historic Landmarks | National Park Service | Landmark wonders |
-| IPEDS directory and enrollment | NCES, Department of Education | Universities |
-| HERD Survey | National Science Foundation (NCSES) | Universities ranked by R&D |
-| 2020 U.S. Religion Census | ASARB, distributed by ARDA | Faith lenses |
-| PLACES county data | CDC | Wellbeing lens |
-| Disaster Declarations Summaries | FEMA (OpenFEMA) | Disasters lens |
-| Billion-Dollar Weather and Climate Disasters | NOAA NCEI | Billion-dollar disasters by state |
+| 行政区划边界 areas_v3（省、地、县，含南海断续线） | 阿里云 DataV.GeoAtlas（源自高德开放平台，依据标准地图） | 国界、省界、县级查找、南海诸岛附图 |
+| 台湾城市与岛屿坐标 | Wikidata（CC0） | 台湾 6 市、钓鱼岛等标注点 |
+| Natural Earth 1:10m（中国视角版国家、湖泊、河流） | Natural Earth（公有领域） | 邻国背景、湖泊、河流 |
+| ETOPO1（经 ERDDAP） | NOAA NCEI | 高程、起伏、山体阴影、海深 |
+| MODIS MCD12Q1 v061 土地覆盖（IGBP，2024，经 GIBS） | NASA LP DAAC / GIBS | 土地覆盖 |
+| 第七次全国人口普查公报（第二号、第三号）、2023 年国民经济和社会发展统计公报 | 国家统计局 | 七普人口、全国合计 |
+| 各市（州、盟）与各省 2023 年统计公报（经中国统计信息网 tjcn.org 转载；正文缺失时取其链接的统计局官方 PDF/Word 附件，失效链接取互联网档案馆存档） | 各地统计局 | 2023 年人口、GDP、三次产业增加值 |
+| 广东、黑龙江、山东、江西、陕西、河南、山西、广西《统计年鉴2024》分市表（Excel） | 各省统计局 | 公报缺失时补充 2023 年人口、GDP |
+| 村里户数、人口数（ODRP019，2023 年底） | 台湾地区内政部户政司 | 台湾省及 6 市 2023 年人口（户籍人口） |
+| 城市七普人口、部分省份统计年鉴 GDP（维基百科转录官方出版物） | 《中国人口普查分县资料—2020》、各省七普公报、各省统计年鉴2024 | 七普人口补全、个别城市 GDP |
+| 香港 GDP 与人口；港元汇率 | 香港政府统计处；香港金融管理局 | 香港数据（折算人民币） |
+| 澳门 GDP | 澳门统计暨普查局（经维基百科转引） | 澳门数据 |
+| 广西、山东、福建统计年鉴 2025 分市分行业表；2024 年全国科技经费投入统计公报 | 各省统计局；国家统计局、科技部、财政部 | 分行业就业、R&D（覆盖不足，暂未用于产出） |
+| 2025 年全国民用运输机场生产统计公报 | 中国民用航空局 | 机场吞吐量排名 |
+| 2025 年港口货物、集装箱吞吐量 | 交通运输部 | 主要港口 |
+| 机场坐标 | OurAirports、Wikidata | 机场位置 |
+| 高速铁路、干线铁路、高速公路（Overpass 提取，2026-11） | © OpenStreetMap 贡献者，ODbL 1.0 | 地块改良 |
+| Global Integrated Power Tracker、Coal Plant / Nuclear / Coal Mine / Iron Ore Mines / Oil and Gas Extraction Tracker | Global Energy Monitor（CC BY 4.0） | 发电厂、煤矿、铁矿、油气田 |
+| 世界遗产名录（whc001） | UNESCO | 世界遗产奇观 |
+| 首批国家公园名单 | 新华网 / 人民日报 | 国家公园奇观 |
+| 国家 5A 级旅游景区名录 | 文化和旅游部 | 5A 景区奇观 |
+| “双一流”建设高校名单（2017、2022） | 教育部 | 大学奇观 |
 
-### Reading the map honestly
+### 如何正确理解这张图
 
-The map is drawn to be fun, but the numbers are real, so it is worth knowing where the game metaphor stops:
+- **产出只是给真实数字起的游戏名字。** 金币就是 GDP；粮食、生产力是第一、第二产业增加值。科研、文化暂无覆盖全国的
+  城市数据，因此留空。
+- **统计年份统一为 2023 年。** 某城市没有 2023 年数据时留空，不用其他年份替代；旗标上暗色显示的人口为七普（2020）数字，
+  城市面板会注明。2023 年常住人口覆盖 291/344 个城市（其余多为公报只报户籍人口或以图片发布）；人口排名、省份城市列表与
+  排行榜在缺 2023 年数字时按七普人口排列并标注。保定、咸阳的 2023 年统计口径不含雄安新区、西咸新区部分区域，其人口增长率置空。
+- **港澳台：** 全国合计为国家统计局口径（31 个省、自治区、直辖市，不含港澳台）。香港、澳门的 GDP 取自特区政府统计并折算
+  人民币；台湾地区的人口取台湾地区内政部户政司公布的 2023 年底户籍人口，GDP 本版未取得，留空（显示“–”），而不是 0。台湾、香港、澳门的机场与港口暂未收录。
+- **位置是示意性的。** 每个六边形约 1,600 km²；港口放在其主要港区所在县的驻地；铁路与公路为概括线形。
+- **入选靠规则而非印象。** 机场、港口、资源和奇观的入选规则都写在数据文件里，并在应用中展示。
+- **坐标系：** DataV 边界为 GCJ-02 坐标，未做纠偏（与 WGS-84 相差不足 1 公里，远小于 25 公里的格子）。
 
-- **Yields are names given to real figures.** Gold is GDP. Food, Production, Science and Culture are job counts by
-  industry, counted where people live.
-- **Positions are schematic.** Each hex is about 1,600 km² and shows the place it covers. District plaques show
-  what a metro specialises in, not where in the metro those jobs are. Roads and rail are generalised line work.
-- **Missing data stays missing:** it is null, never 0. Where a publisher suppresses a figure, the map says so or
-  marks the estimate (≈).
-- **Selections are rules, not opinions.** Wonders, forts and trade routes are picked by rules that are published
-  inside the data files and shown in the app.
-- **Every lens states its caveat.** For example, the Religion Census counts congregations' adherents, not what
-  residents believe, and covers about half the population.
+### 审图与合规说明
 
-### Credits and terms
+- 本地图仅供个人学习，**未申请审图号**，不得作为正式出版地图使用。
+- 中国国界、省界与南海断续线只采用依据标准地图的 DataV.GeoAtlas 数据，**不**使用 Natural Earth / GADM / OSM 的中国国界；
+  邻国轮廓取自 Natural Earth 中国视角版，仅作背景（已去除其中单列的黄岩岛要素）。
+- 陆地国界按标准地图图例分“国界”“未定国界”两种符号（与克什米尔地区相邻段画作未定国界，见百科“地图说明”的图例；
+  其余分段如需调整，改 `pipeline/build/world.py` 的 `UNDEFINED_BOUNDARY`，并以标准地图服务网站的现行样图为准）。
+- 台湾省作为省份绘制；藏南地区、阿克赛钦地区在国界之内；南海诸岛与十段断续线完整画在附图中；钓鱼岛、赤尾屿以中国地名标注。
+- 不含任何军事内容；宗教、灾害、货运路线等内容不在第一阶段范围内。
+- 上述说明同时显示在应用的“帮助”（`?`）与“百科 → 地图说明 / 数据来源”中。
 
-The code is MIT-licensed (see [LICENSE](LICENSE)). That licence covers the code only, not the data. Most of the
-data comes from U.S. federal agencies and is in the public domain. Natural Earth is public domain. The faith lenses
-are figures derived from the 2020 U.S. Religion Census (© 2022 ASARB). They are used under the ARDA usage terms,
-which ask for credit to the Association of Statisticians of American Religious Bodies and the Association of
-Religion Data Archives. Please keep that credit if you reuse them.
+### 致谢与许可
 
-The look is inspired by turn-based 4X strategy games, but every glyph, icon and texture here is original and drawn
-in code. This project is not affiliated with or endorsed by any game publisher.
+代码采用 MIT 许可证（见 [LICENSE](LICENSE)），源自 Andrej Karpathy 的 usaciv（© 2026 Andrej Karpathy，MIT）。
+许可只覆盖代码，不覆盖数据：各数据集遵循其发布者的条款，例如 OpenStreetMap（ODbL 1.0，需署名
+“© OpenStreetMap 贡献者”）、Global Energy Monitor（CC BY 4.0）、Wikidata（CC0）、Natural Earth（公有领域）、
+DataV.GeoAtlas（免费公开数据，仅供学习研究）。重新使用时请保留相应署名。
 
-## Ideas
+外观受回合制 4X 策略游戏启发，但所有图标、纹理和图形都由代码绘制；本项目与任何游戏发行商无关。
 
-- A county-level elections lens.
-- Alaska and Hawaii insets, so the whole country is on the map.
-- USDA crops as agricultural resources.
-- A county "Specialisation" lens from `districts.json`.
-- A time slider: yearly population (2020 onwards) is already in `cities.json`, and BEA has GDP history.
+## 第二阶段设想
 
-Forks and experiments are welcome.
+- 透镜（lenses）：按城市或省份着色的人均 GDP、人口增长、城镇化率、人均可支配收入等（数据已部分在 cn_stats_city 中）。
+- 补齐产出：以七普分行业就业或第五次经济普查年鉴为全国统一口径，点亮科研与文化；补齐其余公报只报户籍人口或以图片发布的城市（其余各省《统计年鉴2024》分市表）。
+- 台湾地区 GDP（主计总处）与港澳台机场、港口的官方统计。
+- 把 usaciv 的“顾问”仪表盘（能源、经济、文化、探索）移植为中文版。
+- 时间滑块：2020–2024 年人口与 GDP 序列；高铁网络的历年开通。
+- 县级界面与更细的城市建成区；国家级新区、自贸区等图层。
+
+欢迎分叉与实验。
