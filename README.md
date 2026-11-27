@@ -91,6 +91,10 @@ uv run python -m pipeline serve [--port 8765]         # 本地服务 web/
 uv run python -m pipeline package                     # chinaciv.zip：可上传的网站，内含源码 chinaciv-source.zip
 ```
 
+### 部署到 Cloudflare Workers
+
+登录 Wrangler 后，在仓库根目录运行 `npx wrangler deploy`，将 `web/` 静态文件部署为 `chinaciv` Worker。自定义域名可在部署后配置。
+
 ## 工作原理
 
 ```
